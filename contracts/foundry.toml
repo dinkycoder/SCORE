@@ -1,0 +1,10 @@
+[profile.default]
+src = 'src'
+out = 'out'
+libs = ['lib']
+test = 'test'
+solc = '0.8.25'
+
+[rpc_endpoints]
+base = "https://mainnet.base.org"
+base_sepolia = "https://sepolia.base.org"

@@ -1,0 +1,16 @@
+name: Auto-push to GitHub
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config --global user.name "SCORE CI Bot"
+          git config --global user.email "ci@score.local"
+          git push origin HEAD:main --force-with-lease
