@@ -2,7 +2,7 @@
 
 **On-chain AI powered credit intelligence.**
 
-SCORE is a real-time wallet risk scoring system for Base-based lending protocols.
+SCORE is a real-time wallet risk scoring system for Base lending protocols.
 
 ## Phase 0: MVP (Weeks 1–8)
 
