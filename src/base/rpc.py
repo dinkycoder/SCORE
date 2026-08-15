@@ -1,14 +1,17 @@
-"""
-src/base/rpc.py — Base RPC client for querying Moonwell lending state.
+ï»¿"""
+src/base/rpc.py - Base RPC client for querying Moonwell lending state.
+
+Reads are performed via eth_call: no transaction, no gas, no signature.
+Safe to run against Base mainnet.
 """
 
-import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from web3 import Web3
 
 logger = logging.getLogger(__name__)
 
+# Minimal ABI - only the function we need.
 COMPTROLLER_ABI = [
     {
         "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
@@ -23,83 +26,67 @@ COMPTROLLER_ABI = [
     }
 ]
 
+# Verified against docs.moonwell.fi/moonwell/protocol-information/contracts
+# on 2026-08-15. Moonwell has NO Base Sepolia deployment; these are mainnet.
+MOONWELL_COMPTROLLER_BASE = "0xfBb21d0380beE3312B33c4353c8936a0F13EF26C"
+MOONWELL_ORACLE_BASE = "0xEC942bE8A8114bFD0396A5052c36027f2cA6a9d0"
+
+BASE_MAINNET_RPC = "https://mainnet.base.org"
+
+
 class BaseRPCClient:
-    """Client for querying Base blockchain and Moonwell lending protocol."""
-    
-    MOONWELL_COMPTROLLER_SEPOLIA = "0xfBb21d0380beE3312B33c4353c8936a3921d3e47"
-    
-    def __init__(self, rpc_url: str):
+    """Reads wallet state from Moonwell on Base."""
+
+    def __init__(self, rpc_url: str = BASE_MAINNET_RPC,
+                 comptroller_address: str = MOONWELL_COMPTROLLER_BASE):
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+
         if not self.w3.is_connected():
             raise ConnectionError(f"Cannot connect to {rpc_url}")
-        logger.info(f"Connected to Base RPC. Chain ID: {self.w3.eth.chain_id}")
+
+        chain_id = self.w3.eth.chain_id
+        if chain_id != 8453:
+            logger.warning(
+                "Connected to chain %s, expected 8453 (Base mainnet). "
+                "Moonwell is not deployed on Base testnets.", chain_id
+            )
+
+        logger.info("Connected to Base. Chain ID: %s", chain_id)
+
         self.comptroller = self.w3.eth.contract(
-            address=Web3.to_checksum_address(self.MOONWELL_COMPTROLLER_SEPOLIA),
+            address=Web3.to_checksum_address(comptroller_address),
             abi=COMPTROLLER_ABI,
         )
-    
-    def get_balance(self, address: str) -> float:
-        try:
-            checksum_addr = Web3.to_checksum_address(address)
-            balance_wei = self.w3.eth.get_balance(checksum_addr)
-            balance_eth = Web3.from_wei(balance_wei, 'ether')
-            logger.debug(f"ETH balance for {address}: {balance_eth}")
-            return balance_eth
-        except Exception as e:
-            logger.error(f"Error fetching ETH balance for {address}: {e}")
-            raise
-    
-    def is_contract(self, address: str) -> bool:
-        try:
-            checksum_addr = Web3.to_checksum_address(address)
-            code = self.w3.eth.get_code(checksum_addr)
-            return code != b''
-        except Exception as e:
-            logger.error(f"Error checking if {address} is contract: {e}")
-            raise
-    
+
     def get_latest_block(self) -> int:
         return self.w3.eth.block_number
-    
+
     def get_account_liquidity(self, wallet_address: str) -> Dict[str, Any]:
-        try:
-            checksum_addr = Web3.to_checksum_address(wallet_address)
-            error, liquidity, shortfall = self.comptroller.functions.getAccountLiquidity(
-                checksum_addr
-            ).call()
-            
-            result = {
-                "error": error,
-                "liquidity_wei": int(liquidity),
-                "shortfall_wei": int(shortfall),
-                "liquidity_usd": Web3.from_wei(liquidity, 'ether'),
-                "shortfall_usd": Web3.from_wei(shortfall, 'ether'),
-            }
-            logger.debug(f"Liquidity for {wallet_address}: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Error fetching account liquidity for {wallet_address}: {e}")
-            raise
-    
-    def get_wallet_state(self, wallet_address: str) -> Dict[str, Any]:
-        try:
-            checksum_addr = Web3.to_checksum_address(wallet_address)
-            eth_balance = self.get_balance(checksum_addr)
-            liquidity_info = self.get_account_liquidity(checksum_addr)
-            is_contract = self.is_contract(checksum_addr)
-            
-            wallet_state = {
-                "wallet_address": checksum_addr,
-                "eth_balance": eth_balance,
-                "is_contract": is_contract,
-                "moonwell_liquidity_usd": liquidity_info["liquidity_usd"],
-                "moonwell_shortfall_usd": liquidity_info["shortfall_usd"],
-                "block_number": self.get_latest_block(),
-                "timestamp": self.w3.eth.get_block("latest").timestamp,
-            }
-            
-            logger.info(f"Wallet state fetched for {wallet_address}")
-            return wallet_state
-        except Exception as e:
-            logger.error(f"Error fetching wallet state for {wallet_address}: {e}")
-            raise
+        """
+        Query borrowing capacity versus outstanding debt.
+
+        Returns liquidity (surplus capacity) and shortfall (deficit).
+        At most one is non-zero. A non-zero shortfall means the position
+        is liquidatable right now.
+
+        NOTE: raw values are scaled integers. The divisor and denomination
+        are asserted-but-unverified; confirm empirically before trusting
+        any downstream dollar figure.
+        """
+        addr = Web3.to_checksum_address(wallet_address)
+
+        error, liquidity, shortfall = (
+            self.comptroller.functions.getAccountLiquidity(addr).call()
+        )
+
+        if error != 0:
+            raise RuntimeError(f"Comptroller returned error code {error}")
+
+        return {
+            "wallet_address": addr,
+            "liquidity_raw": int(liquidity),
+            "shortfall_raw": int(shortfall),
+            "liquidity_scaled": float(Web3.from_wei(liquidity, "ether")),
+            "shortfall_scaled": float(Web3.from_wei(shortfall, "ether")),
+            "block_number": self.get_latest_block(),
+        }
