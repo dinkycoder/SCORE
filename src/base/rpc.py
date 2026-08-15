@@ -1,9 +1,12 @@
 """
 src/base/rpc.py - Read wallet positions from Moonwell on Base.
 
-All calls are reads (eth_call): no transaction, no gas, no signature.
+Every read is batched through Multicall3, which executes many contract
+calls inside a single eth_call. A wallet score costs ONE network round
+trip rather than one per contract read. Multicall3 also guarantees every
+value comes from the same block, which sequential calls do not.
 
-Scaling, which is the only subtle part:
+Scaling, the only subtle arithmetic:
 
     Let d = the underlying token's decimals (USDC 6, WETH 18, cbBTC 8).
 
@@ -20,18 +23,16 @@ Scaling, which is the only subtle part:
         underlying_raw = mTokenBalance * exchangeRate / 1e18
         usd_1e18       = underlying_raw * price / 1e18
 
-    The oracle's 36-d convention exists so d cancels. That is why USD
-    values land at 1e18 for every token.
-
-    Confirmed empirically 2026-08-15: derived and reported liquidity
-    agreed to a ratio of 1.000000 on wallet 0xAA503ae3.
+    The oracle's 36-d convention exists so d cancels. Confirmed
+    empirically 2026-08-15: derived and reported liquidity agreed to a
+    ratio of 1.000000 on wallet 0xAA503ae3.
 """
 
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from eth_abi import decode as abi_decode
 from web3 import Web3
 
 from . import config
@@ -40,9 +41,29 @@ logger = logging.getLogger(__name__)
 
 WAD = config.WAD
 
+# Deterministic CREATE2 deployment: identical on every EVM chain.
+# Verified 2026-08-15 against mds1/multicall3 and Basescan.
+MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+MULTICALL3_ABI = [
+    {"inputs": [{"components": [
+        {"name": "target", "type": "address"},
+        {"name": "allowFailure", "type": "bool"},
+        {"name": "callData", "type": "bytes"}],
+        "name": "calls", "type": "tuple[]"}],
+     "name": "aggregate3",
+     "outputs": [{"components": [
+         {"name": "success", "type": "bool"},
+         {"name": "returnData", "type": "bytes"}],
+         "name": "returnData", "type": "tuple[]"}],
+     "stateMutability": "payable", "type": "function"},
+    {"inputs": [], "name": "getBlockNumber",
+     "outputs": [{"name": "blockNumber", "type": "uint256"}],
+     "stateMutability": "view", "type": "function"},
+]
+
 COMPTROLLER_ABI = [
-    {"inputs": [{"name": "account", "type": "address"}],
-     "name": "getAssetsIn",
+    {"inputs": [], "name": "getAllMarkets",
      "outputs": [{"name": "", "type": "address[]"}],
      "stateMutability": "view", "type": "function"},
     {"inputs": [{"name": "account", "type": "address"}],
@@ -54,20 +75,9 @@ COMPTROLLER_ABI = [
     {"inputs": [], "name": "oracle",
      "outputs": [{"name": "", "type": "address"}],
      "stateMutability": "view", "type": "function"},
-]
-
-MARKETS_ABI_2 = [
     {"inputs": [{"name": "", "type": "address"}], "name": "markets",
      "outputs": [{"name": "isListed", "type": "bool"},
                  {"name": "collateralFactorMantissa", "type": "uint256"}],
-     "stateMutability": "view", "type": "function"},
-]
-
-MARKETS_ABI_3 = [
-    {"inputs": [{"name": "", "type": "address"}], "name": "markets",
-     "outputs": [{"name": "isListed", "type": "bool"},
-                 {"name": "collateralFactorMantissa", "type": "uint256"},
-                 {"name": "isComped", "type": "bool"}],
      "stateMutability": "view", "type": "function"},
 ]
 
@@ -146,20 +156,27 @@ class WalletPosition:
 
     @property
     def market_count(self) -> int:
-        """Markets with a non-zero supply or borrow."""
         return len(self.markets)
 
 
+@dataclass
+class MarketMeta:
+    """Static per-market data. Fetched once, reused across wallets."""
+    address: str
+    symbol: str
+    decimals: int
+    collateral_factor: Optional[float]
+
+
 class BaseRPCClient:
-    """Reads Moonwell wallet state from Base."""
+    """Reads Moonwell wallet state from Base, batched via Multicall3."""
 
     def __init__(self, rpc_url: Optional[str] = None,
-                 comptroller: Optional[str] = None,
-                 pause: float = 0.0, max_retries: int = 5):
+                 comptroller: Optional[str] = None):
         self.rpc_url = rpc_url or config.RPC_URL
-        self.comptroller_address = comptroller or config.COMPTROLLER
-        self.pause = pause
-        self.max_retries = max_retries
+        self.comptroller_address = Web3.to_checksum_address(
+            comptroller or config.COMPTROLLER
+        )
 
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         if not self.w3.is_connected():
@@ -173,95 +190,132 @@ class BaseRPCClient:
                 "Moonwell has no Base testnet deployment."
             )
 
+        self.multicall = self.w3.eth.contract(
+            address=Web3.to_checksum_address(MULTICALL3), abi=MULTICALL3_ABI
+        )
         self.comptroller = self.w3.eth.contract(
-            address=Web3.to_checksum_address(self.comptroller_address),
-            abi=COMPTROLLER_ABI,
+            address=self.comptroller_address, abi=COMPTROLLER_ABI
         )
 
-        self._oracle = None
-        self._markets_abi = None
-        self._decimals_cache: Dict[str, int] = {}
-        self._symbol_cache: Dict[str, str] = {}
-        self._cf_cache: Dict[str, Optional[int]] = {}
+        self._meta: Optional[Dict[str, MarketMeta]] = None
+        self._oracle_address: Optional[str] = None
 
-    # -- internals ---------------------------------------------------------
+    # -- encoding helpers --------------------------------------------------
 
-    def _call(self, fn, *args):
-        """Call a contract function, backing off on rate limits."""
-        delay = 1.0
-        for _ in range(self.max_retries):
-            try:
-                if self.pause:
-                    time.sleep(self.pause)
-                return fn(*args).call()
-            except Exception as exc:
-                if "429" in str(exc) or "Too Many Requests" in str(exc):
-                    logger.warning("rate limited, waiting %.0fs", delay)
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-                raise
-        raise RuntimeError("Rate limited after " + str(self.max_retries)
-                           + " retries on " + self.rpc_url)
+    @staticmethod
+    def _encode(contract, fn_name: str, args: Optional[list] = None) -> str:
+        """Calldata for a function, tolerating web3 v6/v7 API differences."""
+        args = args or []
+        try:
+            return contract.encode_abi(fn_name, args)
+        except (AttributeError, TypeError):
+            return contract.encodeABI(fn_name=fn_name, args=args)
+
+    def _aggregate(self, calls: List[Tuple[str, bool, str]]
+                   ) -> List[Tuple[bool, bytes]]:
+        """
+        Execute many contract calls in ONE eth_call.
+
+        Each call is (target, allow_failure, calldata). Results come back
+        in order as (success, return_data). Every value is read at the
+        same block, which sequential calls cannot guarantee.
+        """
+        if not calls:
+            return []
+        return self.multicall.functions.aggregate3(calls).call()
+
+    # -- warmup ------------------------------------------------------------
+
+    def _load_market_meta(self) -> Dict[str, MarketMeta]:
+        """
+        Fetch static per-market data: symbol, decimals, collateral factor.
+
+        Three round trips, paid once per client. Scoring N wallets after
+        this costs N round trips, not N * markets.
+        """
+        try:
+            markets = self.comptroller.functions.getAllMarkets().call()
+        except Exception:
+            logger.warning("getAllMarkets failed; falling back to config")
+            markets = list(config.MARKETS.values())
+
+        markets = [Web3.to_checksum_address(m) for m in markets]
+        mtoken = self.w3.eth.contract(address=markets[0], abi=MTOKEN_ABI)
+
+        # Batch 1: symbol, underlying, and collateral factor for every market.
+        calls: List[Tuple[str, bool, str]] = []
+        for m in markets:
+            calls.append((m, True, self._encode(mtoken, "symbol")))
+            calls.append((m, True, self._encode(mtoken, "underlying")))
+            calls.append((self.comptroller_address, True,
+                          self._encode(self.comptroller, "markets", [m])))
+
+        results = self._aggregate(calls)
+
+        symbols: Dict[str, str] = {}
+        underlyings: Dict[str, Optional[str]] = {}
+        factors: Dict[str, Optional[float]] = {}
+
+        for i, m in enumerate(markets):
+            ok_sym, sym_data = results[i * 3]
+            ok_und, und_data = results[i * 3 + 1]
+            ok_mkt, mkt_data = results[i * 3 + 2]
+
+            symbols[m] = (abi_decode(["string"], sym_data)[0]
+                          if ok_sym and sym_data else m[:10])
+
+            underlyings[m] = (abi_decode(["address"], und_data)[0]
+                              if ok_und and und_data else None)
+
+            # Moonwell may return (bool, uint) or Compound's (bool, uint, bool).
+            # Byte length disambiguates: 64 vs 96.
+            if ok_mkt and mkt_data:
+                types = (["bool", "uint256", "bool"] if len(mkt_data) >= 96
+                         else ["bool", "uint256"])
+                factors[m] = abi_decode(types, mkt_data)[1] / WAD
+            else:
+                factors[m] = None
+
+        # Batch 2: decimals for each distinct underlying token.
+        distinct = sorted({u for u in underlyings.values() if u})
+        erc20 = (self.w3.eth.contract(
+            address=Web3.to_checksum_address(distinct[0]), abi=ERC20_ABI)
+            if distinct else None)
+
+        decimals_by_token: Dict[str, int] = {}
+        if erc20 is not None:
+            dec_calls = [(Web3.to_checksum_address(u), True,
+                          self._encode(erc20, "decimals")) for u in distinct]
+            for u, (ok, data) in zip(distinct, self._aggregate(dec_calls)):
+                decimals_by_token[u] = (abi_decode(["uint8"], data)[0]
+                                        if ok and data else 18)
+
+        meta = {}
+        for m in markets:
+            u = underlyings[m]
+            meta[m] = MarketMeta(
+                address=m,
+                symbol=symbols[m],
+                decimals=decimals_by_token.get(u, 18),
+                collateral_factor=factors[m],
+            )
+
+        logger.info("Loaded metadata for %d markets", len(meta))
+        return meta
 
     @property
-    def oracle(self):
-        if self._oracle is None:
-            addr = self._call(self.comptroller.functions.oracle)
-            self._oracle = self.w3.eth.contract(
-                address=Web3.to_checksum_address(addr), abi=ORACLE_ABI
+    def market_meta(self) -> Dict[str, MarketMeta]:
+        if self._meta is None:
+            self._meta = self._load_market_meta()
+        return self._meta
+
+    @property
+    def oracle_address(self) -> str:
+        if self._oracle_address is None:
+            self._oracle_address = Web3.to_checksum_address(
+                self.comptroller.functions.oracle().call()
             )
-        return self._oracle
-
-    def _collateral_factor(self, market: str) -> Optional[int]:
-        """Collateral factor mantissa, cached. Handles both fork variants."""
-        if market in self._cf_cache:
-            return self._cf_cache[market]
-
-        candidates = ([self._markets_abi] if self._markets_abi
-                      else [MARKETS_ABI_2, MARKETS_ABI_3])
-
-        for abi in candidates:
-            try:
-                c = self.w3.eth.contract(
-                    address=Web3.to_checksum_address(self.comptroller_address),
-                    abi=abi,
-                )
-                result = self._call(c.functions.markets,
-                                    Web3.to_checksum_address(market))
-                self._markets_abi = abi
-                self._cf_cache[market] = int(result[1])
-                return self._cf_cache[market]
-            except Exception:
-                continue
-
-        logger.warning("Could not read collateral factor for %s", market)
-        self._cf_cache[market] = None
-        return None
-
-    def _decimals(self, market: str, mtoken) -> int:
-        if market in self._decimals_cache:
-            return self._decimals_cache[market]
-        try:
-            underlying = self._call(mtoken.functions.underlying)
-            erc20 = self.w3.eth.contract(
-                address=Web3.to_checksum_address(underlying), abi=ERC20_ABI
-            )
-            d = int(self._call(erc20.functions.decimals))
-        except Exception:
-            d = 18
-        self._decimals_cache[market] = d
-        return d
-
-    def _symbol(self, market: str, mtoken) -> str:
-        if market in self._symbol_cache:
-            return self._symbol_cache[market]
-        try:
-            s = self._call(mtoken.functions.symbol)
-        except Exception:
-            s = market[:10]
-        self._symbol_cache[market] = s
-        return s
+        return self._oracle_address
 
     # -- public API --------------------------------------------------------
 
@@ -269,71 +323,103 @@ class BaseRPCClient:
         return self.w3.eth.block_number
 
     def get_account_liquidity(self, wallet: str) -> Dict[str, float]:
-        """Remaining borrowing capacity (liquidity) or deficit (shortfall)."""
+        """Remaining borrowing capacity, or deficit if underwater."""
         addr = Web3.to_checksum_address(wallet)
-        error, liquidity, shortfall = self._call(
-            self.comptroller.functions.getAccountLiquidity, addr
+        error, liquidity, shortfall = (
+            self.comptroller.functions.getAccountLiquidity(addr).call()
         )
         if error != 0:
             raise RuntimeError("Comptroller error " + str(error))
-        return {
-            "liquidity_usd": liquidity / WAD,
-            "shortfall_usd": shortfall / WAD,
-        }
+        return {"liquidity_usd": liquidity / WAD,
+                "shortfall_usd": shortfall / WAD}
 
     def get_wallet_position(self, wallet: str) -> WalletPosition:
         """
-        Full position across every market the wallet has entered.
+        Full position across every Moonwell market, in ONE round trip.
 
-        Markets with no supply and no borrow are skipped: getAssetsIn
-        returns markets a wallet has ENABLED, not ones it has a position
-        in, and the empties are usually the majority.
+        Batches every snapshot, every price, the account liquidity, and
+        the block number into a single aggregate3 call. Prices do not
+        depend on the wallet, so they ride along at no extra cost.
         """
         addr = Web3.to_checksum_address(wallet)
+        meta = self.market_meta
+        markets = list(meta.keys())
+
+        mtoken = self.w3.eth.contract(address=markets[0], abi=MTOKEN_ABI)
+        oracle = self.w3.eth.contract(
+            address=self.oracle_address, abi=ORACLE_ABI
+        )
+
+        calls: List[Tuple[str, bool, str]] = []
+
+        # Block first, so it is unambiguous which block everything is from.
+        calls.append((Web3.to_checksum_address(MULTICALL3), False,
+                      self._encode(self.multicall, "getBlockNumber")))
+        calls.append((self.comptroller_address, False,
+                      self._encode(self.comptroller,
+                                   "getAccountLiquidity", [addr])))
+        for m in markets:
+            calls.append((m, True, self._encode(
+                mtoken, "getAccountSnapshot", [addr])))
+        for m in markets:
+            calls.append((self.oracle_address, True, self._encode(
+                oracle, "getUnderlyingPrice", [m])))
+
+        results = self._aggregate(calls)
+
+        block_number = abi_decode(["uint256"], results[0][1])[0]
+        _err, liquidity, shortfall = abi_decode(
+            ["uint256", "uint256", "uint256"], results[1][1]
+        )
+
+        n = len(markets)
+        snapshots = results[2:2 + n]
+        prices = results[2 + n:2 + 2 * n]
 
         position = WalletPosition(
             wallet_address=addr,
-            block_number=self.get_latest_block(),
+            block_number=block_number,
+            reported_liquidity_usd=liquidity / WAD,
+            reported_shortfall_usd=shortfall / WAD,
         )
 
-        entered = self._call(self.comptroller.functions.getAssetsIn, addr)
-
-        for market in entered:
-            market_cs = Web3.to_checksum_address(market)
-            mtoken = self.w3.eth.contract(address=market_cs, abi=MTOKEN_ABI)
-
-            error, m_bal, borrow_bal, exch_rate = self._call(
-                mtoken.functions.getAccountSnapshot, addr
-            )
-            if error != 0:
-                logger.warning("snapshot error %s on %s", error, market_cs)
+        for i, m in enumerate(markets):
+            ok_snap, snap_data = snapshots[i]
+            if not ok_snap or not snap_data:
                 continue
 
+            error, m_bal, borrow_bal, exch_rate = abi_decode(
+                ["uint256", "uint256", "uint256", "uint256"], snap_data
+            )
+            if error != 0:
+                logger.warning("snapshot error %s on %s", error, m)
+                continue
+
+            # getAllMarkets returns every market; most are empty for any
+            # given wallet. Skipping them costs nothing since the calls
+            # were already batched.
             if m_bal == 0 and borrow_bal == 0:
                 continue
 
-            d = self._decimals(market_cs, mtoken)
-            symbol = self._symbol(market_cs, mtoken)
-            price = self._call(self.oracle.functions.getUnderlyingPrice,
-                               market_cs)
-            cf = self._collateral_factor(market_cs)
+            ok_price, price_data = prices[i]
+            if not ok_price or not price_data:
+                logger.warning("no price for %s; skipping", m)
+                continue
+            price = abi_decode(["uint256"], price_data)[0]
 
+            info = meta[m]
             supplied_raw = m_bal * exch_rate // WAD
             collateral_usd = supplied_raw * price // WAD
             debt_usd = borrow_bal * price // WAD
 
             position.markets.append(MarketPosition(
-                market_address=market_cs,
-                symbol=symbol,
-                supplied_underlying=supplied_raw / (10 ** d),
-                borrowed_underlying=borrow_bal / (10 ** d),
+                market_address=m,
+                symbol=info.symbol,
+                supplied_underlying=supplied_raw / (10 ** info.decimals),
+                borrowed_underlying=borrow_bal / (10 ** info.decimals),
                 collateral_usd=collateral_usd / WAD,
                 debt_usd=debt_usd / WAD,
-                collateral_factor=(cf / WAD) if cf is not None else None,
+                collateral_factor=info.collateral_factor,
             ))
-
-        liq = self.get_account_liquidity(addr)
-        position.reported_liquidity_usd = liq["liquidity_usd"]
-        position.reported_shortfall_usd = liq["shortfall_usd"]
 
         return position
