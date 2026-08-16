@@ -22,5 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run unit tests
+        # Live tests are excluded deliberately: CI has no RPC endpoint and
+        # must not make network calls. Excluding by marker rather than
+        # relying on a runtime skip, so the intent is stated rather than
+        # accidental.
+        run: pytest tests/ -v -m "not live"
