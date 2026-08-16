@@ -9,7 +9,7 @@
 > independent derivation has confirmed it. Plausibility does not close an
 > item.
 >
-> Last reviewed: 2026-08-16
+> Last reviewed: 2026-08-16 (rev 2)
 
 ## Closed
 
@@ -40,6 +40,33 @@ consistent with observed behaviour across all wallets queried.
 for a single round trip. Measured locally 2026-08-15 across ten samples via
 `tests/test_latency.py`. Machine-specific and provider-specific; should be
 described as measured rather than as characteristic.
+
+**Moonwell liquidation volume (feasibility of hurdle model).** Confirmed
+2026-08-16 via DefiLlama, which reports Moonwell liquidation fees by quarter
+(millions per quarter across 2024-2026). A liquidation fee is a share of each
+liquidated position, so this establishes thousands of liquidation events,
+far above the reference paper's 139-wallet severity sample. The modelled
+stages are feasible on banked history; this closes open question 1 of the
+prior Phase 0 draft.
+
+**Moonwell oracle incidents.** PREVIOUSLY "not applicable" - now CONFIRMED.
+DefiLlama records two: 2025-11-04, $1M, spot price manipulation (Base and
+Optimism); and 2026-02-15, $1.78M, oracle misconfiguration (Base). Chapter 1
+and these notes previously stated no incident had been confirmed. Two are now
+confirmed from a primary aggregator. The manuscript should present these as
+fact. They bear directly on SCORE, which inherits oracle manipulability.
+
+**Moonwell TVL trajectory.** Confirmed 2026-08-16 via DefiLlama chart: peak
+~$374M mid-2026, declined to ~$60M currently (~84% drawdown, ongoing), active
+loans ~$31M. An earlier verbal figure of "8.7% over 30 days" measured only
+the flattest recent segment and understated the full decline. The contraction
+is real and is addressed in PHASE_0.md under protocol strategy.
+
+**Morpho and Aave TVL trajectories (protocol-strategy basis).** Confirmed
+2026-08-16 via DefiLlama charts. Morpho: near-monotonic growth to ~$8B, at or
+near all-time high, growing. Aave: peaked ~$45B late 2025, declined to
+~$13-15B, contracting. An earlier claim that "both are growing" was wrong on
+Aave and is corrected: only Morpho is growing.
 
 ## Open
 
@@ -91,9 +118,14 @@ publicly framed on-chain credit scoring as an opportunity is not confirmed
 in available reporting of the July 2026 podcast appearance. Cite the primary
 recording with a timestamp, or omit.
 
+
+**eth_getLogs free-tier cap (infrastructure fact, not a manuscript claim).**
+Confirmed 2026-08-16 by direct probe: Alchemy free tier rejects eth_getLogs
+above ~10 blocks per request with a -32600 error naming the plan limit. This
+blocks bulk historical extraction and is recorded in PHASE_0.md. Noted here so
+the constraint is not rediscovered.
+
 ## Not applicable
 
-**Moonwell oracle incidents.** No documented incident was located. The
-manuscript makes no claim that one occurred. The Comptroller's oracle
-admin override is a design-level risk surface and may be discussed as such
-without asserting an exploit.
+*(The prior "Moonwell oracle incidents - none located" entry has moved to
+Closed: two incidents are now confirmed. See above.)*
