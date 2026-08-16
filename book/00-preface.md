@@ -74,7 +74,9 @@ Chapters correspond to build stages.
 
 **Chapter 1 — Reading the Chain.** The contents of a lending protocol's on-chain state, the method of querying it, and the meaning of the returned values. Constructs a working client that reads live wallet state from a lending market on Base.
 
-**Chapters 2–3 — Scoring in Real Time.** The conversion of raw state into features, features into a risk score, and the score into a service that responds within a second.
+**Chapter 2 — Verifying the Arithmetic.** The reconstruction of a wallet's full position, the decimal conventions governing it, and the method by which a numerical assumption is established rather than assumed. Includes an account of four defects, each of which passed its own tests.
+
+**Chapter 3 — Scoring in Real Time.** The conversion of verified features into a service that responds within a second, and the boundary between what such a service measures and what it may claim.
 
 **Chapters 4–5 — Trust on Chain.** Why a score residing upon a private server is worth less than one anchored to a public ledger, and the construction of the contract that anchors it.
 
