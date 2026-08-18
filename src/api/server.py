@@ -5,6 +5,11 @@ SCOPE: this service computes point-in-time SOLVENCY features from live
 on-chain position data. It does NOT estimate probability of default,
 loss given default, or any modelled quantity. No model has been trained.
 Endpoints report only what is measured.
+
+Every scored address is screened against the OFAC SDN list (see
+docs/OFAC_SCREENING.md). Screening fails loud: if the sanctions list cannot
+be freshly verified, the endpoint returns an error rather than a result, so
+a screening gap can never masquerade as a clean position.
 """
 
 import logging
@@ -16,6 +21,11 @@ from web3 import Web3
 import base.config as config
 from base.rpc import BaseRPCClient
 from scoring.features import extract_features
+from compliance.sanctions import (
+    SanctionsScreener,
+    StaleListError,
+    ListUnavailableError,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +34,7 @@ app = Flask(__name__)
 CORS(app)
 
 _client = None
+_screener = None
 
 
 def get_client() -> BaseRPCClient:
@@ -34,12 +45,20 @@ def get_client() -> BaseRPCClient:
     return _client
 
 
+def get_screener() -> SanctionsScreener:
+    """Lazily construct the sanctions screener so the list loads once."""
+    global _screener
+    if _screener is None:
+        _screener = SanctionsScreener()
+    return _screener
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
         "service": "SCORE",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "chain_id": config.CHAIN_ID,
         "using_public_rpc": config.USING_PUBLIC_RPC,
     }), 200
@@ -68,6 +87,9 @@ def capabilities():
                 "is_underwater",
                 "is_borrower",
             ],
+            "compliance": [
+                "ofac_sdn_screening",
+            ],
         },
         "not_implemented": {
             "probability_of_default": "Requires liquidation labels over a "
@@ -89,14 +111,42 @@ def position(wallet_address: str):
     """
     Point-in-time solvency features for a wallet.
 
-    Returns measured on-chain quantities only. No risk score is returned
-    because no model exists to produce one.
+    Flow:
+      1. Validate the address.
+      2. Screen it against the OFAC SDN list. If the list cannot be freshly
+         verified, return 503 - never fall through to a result, because a
+         screening gap must not look like a clean position.
+      3. Read the position and compute features.
+
+    A sanctioned address is still read and returned, but flagged: flagging
+    for risk is permissible, and the caller needs to see both the match and
+    the position. What matters is that the match is surfaced, not hidden.
     """
     try:
         addr = Web3.to_checksum_address(wallet_address)
     except Exception:
         return jsonify({"error": "Invalid wallet address"}), 400
 
+    # -- sanctions screening (fail loud) ---------------------------------
+    try:
+        screening = get_screener().screen(addr)
+    except StaleListError as exc:
+        logger.error("Sanctions list stale; refusing to screen: %s", exc)
+        return jsonify({
+            "error": "Sanctions screening unavailable",
+            "detail": "The OFAC list could not be freshly verified, so this "
+                      "request cannot be completed. This is a deliberate "
+                      "fail-closed behaviour.",
+        }), 503
+    except ListUnavailableError as exc:
+        logger.error("Sanctions list unavailable; refusing to screen: %s", exc)
+        return jsonify({
+            "error": "Sanctions screening unavailable",
+            "detail": "No OFAC list could be obtained, so this request "
+                      "cannot be completed.",
+        }), 503
+
+    # -- position read ---------------------------------------------------
     try:
         client = get_client()
         pos = client.get_wallet_position(addr)
@@ -109,6 +159,11 @@ def position(wallet_address: str):
     return jsonify({
         "wallet": addr,
         "block_number": pos.block_number,
+        "sanctions": {
+            "is_sanctioned": screening.is_sanctioned,
+            "list_age_hours": screening.list_age_hours,
+            "source": screening.list_source,
+        },
         "features": features.to_dict(),
         "markets": [
             {
@@ -121,7 +176,9 @@ def position(wallet_address: str):
             }
             for m in pos.markets
         ],
-        "disclaimer": "Point-in-time solvency only. Not a credit score.",
+        "disclaimer": "Point-in-time solvency only. Not a credit score. "
+                      "Sanctions screening is necessary but not sufficient; "
+                      "see COMPLIANCE.md.",
     }), 200
 
 
