@@ -14,4 +14,4 @@ pytest-cov==4.1.0
 # NOTE: numpy, pandas, scipy, and scikit-learn are intentionally absent.
 # No model has been trained yet; nothing imports them. They return when
 # the PD/LGD work begins and are pinned then, against what that work
-# actually uses.
+# actually uses.requests==2.32.3
