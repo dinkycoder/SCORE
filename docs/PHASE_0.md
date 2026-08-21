@@ -150,10 +150,12 @@ requires API keys. This is a named Phase 1 cost, not a solved problem.
 - Base RPC client reading full wallet positions across all Moonwell markets
 - All reads batched through Multicall3: one network round trip per wallet
 - Point-in-time solvency features, including capacity utilisation,
-  price-move-to-liquidation, and volatility mismatch
+  headroom / debt_rise_to_liquidation (the two directions of "how far
+  prices must move to liquidate," kept as separate fields since they are
+  different numbers), and volatility mismatch
 - Position arithmetic verified against the Comptroller's own on-chain
   computation to a ratio of 1.000000
-- 13 tests, including a live latency gate and a live correctness gate
+- 34 tests, including a live latency gate and a live correctness gate
 - HTTP interface returning measured features (/position, /capabilities,
   /health), with no unearned model claims
 
@@ -185,8 +187,15 @@ current figure is within 7 ms of the network floor.
    Moonwell, as distinct from wallets that borrowed recently?
 2. What re-scoring cadence do lenders require, and what does that cost
    against RPC compute-unit pricing?
-3. If the scoring key is compromised, setScorer is callable only by the
-   current scorer. An upgrade path should be designed before deployment.
+3. `CreditScorer.sol` has no `setScorer` function - `scorer` is set once in
+   the constructor and cannot be changed after deployment. That means a
+   compromised or lost scorer key has no recovery path today: there is no
+   privileged function to lock down, but also no way to rotate the key
+   without redeploying the contract. Before this contract holds anything
+   consequential, decide deliberately between adding a guarded rotation
+   function (which introduces the privileged-function risk the previous
+   version of this question assumed already existed) and keeping it
+   immutable and accepting redeployment as the only recovery path.
 
 ## Constraints
 
