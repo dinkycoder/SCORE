@@ -11,7 +11,10 @@ flask-cors==4.0.0
 pytest==7.4.4
 pytest-cov==4.1.0
 
+# Compliance: OFAC list fetch
+requests==2.32.3
+
 # NOTE: numpy, pandas, scipy, and scikit-learn are intentionally absent.
 # No model has been trained yet; nothing imports them. They return when
 # the PD/LGD work begins and are pinned then, against what that work
-# actually uses.requests==2.32.3
+# actually uses.

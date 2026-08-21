@@ -59,8 +59,13 @@ inputs cannot be opaque.
   ratio the protocol enforces; it reaches 1.0 exactly at liquidation. A
   better risk measure than raw LTV, which ignores collateral factors and
   understated leverage on the reference wallet by nine percentage points.
-- **price_move_to_liquidation** - the fractional adverse price move that
-  would render the position liquidatable.
+- **headroom** (`1 - capacity_used`) - equivalently, the fractional
+  *collateral*-price drop that would trigger liquidation, holding debt
+  price fixed.
+- **debt_rise_to_liquidation** - the fractional *debt*-price rise that
+  would trigger liquidation, holding collateral price fixed. This is a
+  different, larger number than headroom for any leveraged position, not
+  an alternate phrasing of it - they answer different stress tests.
 - **volatility_mismatch** - true when collateral and debt sit in different
   assets, so the position carries directional price risk beyond its
   leverage. A wallet holding stable collateral against volatile debt is

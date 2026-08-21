@@ -79,6 +79,10 @@ COMPTROLLER_ABI = [
      "outputs": [{"name": "isListed", "type": "bool"},
                  {"name": "collateralFactorMantissa", "type": "uint256"}],
      "stateMutability": "view", "type": "function"},
+    {"inputs": [{"name": "account", "type": "address"}],
+     "name": "getAssetsIn",
+     "outputs": [{"name": "", "type": "address[]"}],
+     "stateMutability": "view", "type": "function"},
 ]
 
 MTOKEN_ABI = [
@@ -121,10 +125,15 @@ class MarketPosition:
     collateral_usd: float
     debt_usd: float
     collateral_factor: Optional[float]
+    is_entered: bool = True
+    """Whether the wallet has entered this market via enterMarkets. Only
+    entered markets count toward the protocol's own getAccountLiquidity;
+    a supplied-but-not-entered balance is real collateral_usd but not
+    usable collateral, and must not be weighted as if it were."""
 
     @property
     def weighted_collateral_usd(self) -> float:
-        if self.collateral_factor is None:
+        if self.collateral_factor is None or not self.is_entered:
             return 0.0
         return self.collateral_usd * self.collateral_factor
 
@@ -337,9 +346,10 @@ class BaseRPCClient:
         """
         Full position across every Moonwell market, in ONE round trip.
 
-        Batches every snapshot, every price, the account liquidity, and
-        the block number into a single aggregate3 call. Prices do not
-        depend on the wallet, so they ride along at no extra cost.
+        Batches every snapshot, every price, the account liquidity, the
+        entered-markets set, and the block number into a single aggregate3
+        call. Prices do not depend on the wallet, so they ride along at no
+        extra cost.
         """
         addr = Web3.to_checksum_address(wallet)
         meta = self.market_meta
@@ -358,6 +368,12 @@ class BaseRPCClient:
         calls.append((self.comptroller_address, False,
                       self._encode(self.comptroller,
                                    "getAccountLiquidity", [addr])))
+        # getAccountLiquidity only counts markets the wallet has ENTERED via
+        # enterMarkets - a supplied-but-not-entered balance is real
+        # collateral_usd but not usable collateral. Fetched here so every
+        # MarketPosition below can be tagged correctly.
+        calls.append((self.comptroller_address, False,
+                      self._encode(self.comptroller, "getAssetsIn", [addr])))
         for m in markets:
             calls.append((m, True, self._encode(
                 mtoken, "getAccountSnapshot", [addr])))
@@ -371,10 +387,14 @@ class BaseRPCClient:
         _err, liquidity, shortfall = abi_decode(
             ["uint256", "uint256", "uint256"], results[1][1]
         )
+        entered = {
+            Web3.to_checksum_address(a)
+            for a in abi_decode(["address[]"], results[2][1])[0]
+        }
 
         n = len(markets)
-        snapshots = results[2:2 + n]
-        prices = results[2 + n:2 + 2 * n]
+        snapshots = results[3:3 + n]
+        prices = results[3 + n:3 + 2 * n]
 
         position = WalletPosition(
             wallet_address=addr,
@@ -420,6 +440,7 @@ class BaseRPCClient:
                 collateral_usd=collateral_usd / WAD,
                 debt_usd=debt_usd / WAD,
                 collateral_factor=info.collateral_factor,
+                is_entered=m in entered,
             ))
 
         return position

@@ -83,6 +83,25 @@ def test_stale_list_refuses():
         s.screen(CLEAN)
 
 
+def test_stale_list_refuses_on_reused_instance():
+    """A screener is constructed once and reused for the life of a server
+    process; the freshness ceiling must be re-checked on every call, not
+    only the first. Regression test: a screener whose list ages past the
+    ceiling mid-process must stop clearing addresses, not clear forever."""
+    s = screener_with([SANCTIONED], max_age_hours=1.0)
+
+    # First call: freshly written cache, must succeed.
+    assert s.screen(CLEAN).is_sanctioned is False
+
+    # Simulate the list ageing past the ceiling while the process keeps
+    # running - no restart, no new screener instance, exactly the shape a
+    # long-lived Flask process holding one screener singleton is in.
+    s._fetched_at = time.time() - (2 * 3600)
+
+    with pytest.raises(StaleListError):
+        s.screen(CLEAN)
+
+
 def test_absent_list_refuses():
     """No cache and no network must raise, not clear."""
     s = SanctionsScreener(

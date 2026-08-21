@@ -83,9 +83,10 @@ def capabilities():
                 "exposure_usd",
                 "market_count",
                 "volatility_mismatch",
-                "price_move_to_liquidation",
+                "debt_rise_to_liquidation",
                 "is_underwater",
                 "is_borrower",
+                "degraded",
             ],
             "compliance": [
                 "ofac_sdn_screening",

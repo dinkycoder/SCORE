@@ -200,10 +200,15 @@ class SanctionsScreener:
 
     def screen(self, address: str) -> ScreeningResult:
         """
-        Screen a single address. Raises if no fresh list is available -
-        a compliance check must fail loud, never silently clear.
+        Screen a single address. Raises if no fresh list is available.
+
+        Freshness is checked on EVERY call, not only when the list is first
+        loaded. A screener is typically constructed once and reused for the
+        life of a server process, so "loaded" and "fresh" are not the same
+        fact once any time has passed - re-checking only at load time would
+        let the ceiling stop applying after the first request.
         """
-        if self._addresses is None:
+        if self._addresses is None or self._age_hours() > self.max_age_hours:
             self.ensure_list()
 
         normalised = address.strip().lower()
@@ -221,9 +226,10 @@ class SanctionsScreener:
         )
 
     def screen_many(self, addresses):
-        """Screen an iterable of addresses; loads the list once."""
-        if self._addresses is None:
-            self.ensure_list()
+        """Screen an iterable of addresses. Each call goes through screen(),
+        so the freshness ceiling is enforced per-address just as it is for
+        a single screen() call; the network fetch itself still only happens
+        when the in-memory list is missing or stale."""
         return [self.screen(a) for a in addresses]
 
 
