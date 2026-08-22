@@ -37,17 +37,35 @@ the fee total is a direct proxy for liquidation volume. Recent quarters
 | Q2 2026 | $104K |
 
 Millions of dollars in liquidation fees per quarter implies thousands of
-liquidation events. Whatever the exact distinct-wallet count, it is far
-above the 139-wallet severity sample on which Achutha et al. trained their
-loss-severity stage. The labels exist in quantity. Extraction is the work,
-not feasibility.
+liquidation events, but an implication is not a count - it assumes an
+average liquidation size nobody had checked. **2026-08-22: counted
+instead.** `scripts/count_liquidations.py` scanned actual `LiquidateBorrow`
+events over a 3-day window (blocks 50,177,530-50,307,130) and found **66
+events, 52 distinct liquidated wallets**, written to
+`data/liquidations_3d.csv` (block, tx hash, market, liquidator, borrower,
+amounts - independently checkable, not just a total). 18 of 12,961
+10-block windows never succeeded even after 12 retries, so this is a
+**measured lower bound**, not an exact count, over **3 days out of the
+multi-year history the fee table above spans** - not a claim about the
+full period.
+
+Even at this floor, 52 distinct wallets in 3 days already exceeds a third
+of the 139-wallet sample Achutha et al. trained their loss-severity stage
+on. A linear scale-up (52 x 630/3 ~= 10,900 over the ~630 days the fee
+table spans) is an extrapolation, not a measurement, and is stated as
+one: real activity is not uniform across that period (see the contraction
+below), but it corroborates the fee-revenue inference's direction and
+supersedes it as evidence - the fee table is now context for why the
+count is plausible, not the basis for the "yes."
 
 Two caveats attach. First, the label stock is historical: most of it was
 generated in 2024 through early 2026, and the Q2 2026 collapse to $104K
 reflects the protocol contraction described below. The training data is
 banked; the live label stream is thinning. Second, extracting these labels
 at scale is blocked on infrastructure (see the eth_getLogs constraint
-below).
+below) - the 3-day sample above took ~78 minutes at a measured, degrading
+~2.8-4.4 windows/s on the free tier, which is why it's 3 days and not the
+full history.
 
 ## Protocol strategy: learn on one, demonstrate on another
 
@@ -128,10 +146,20 @@ score requires; a dedicated endpoint is a prerequisite, not an optimisation.
 
 ## Infrastructure constraint: eth_getLogs on the free tier
 
-Alchemy's free tier caps eth_getLogs at approximately 10 blocks per request.
-Historical liquidation extraction over a 90-day window (~3.9M blocks) would
-require hundreds of thousands of requests, which is impractical and would
-exhaust the monthly compute allowance in a single run.
+Alchemy's free tier caps eth_getLogs at EXACTLY 10 blocks per request -
+confirmed 2026-08-22 via `scripts/probe_range.py`, which reads the number
+directly out of Alchemy's own rejection message rather than assuming it.
+
+Measured the same day via `scripts/count_liquidations.py`: sustained
+throughput at that cap is ~4.4 windows/s at the start of a run, degrading
+to ~2.8/s over a sustained ~78-minute run, and the ceiling held regardless
+of worker count (2, 4, and 5 concurrent workers all converged to
+approximately the same rate) - it is an account-wide throttle, not
+something more concurrency fixes. At the low end of that range, a 90-day
+window would take roughly 24-34 hours of wall time; a full year, 4-10
+days. Both are a live background job away, not a blocker, but neither
+fits inside a single working session - this is why the dataset above is 3
+days, not 90.
 
 This does not affect the live scoring path, which uses eth_call and
 Multicall3, both of which work within free-tier limits. It affects only
