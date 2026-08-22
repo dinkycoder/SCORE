@@ -1,25 +1,41 @@
 """
 scripts/count_liquidations.py - Moonwell Base liquidation feasibility.
 
-Queries LiquidateBorrow events by TOPIC across all contracts (which the
-endpoint handles reliably), then keeps those emitted by a Moonwell market.
-Avoids per-address getLogs, which 400s on markets deployed mid-window.
+Answers PHASE_0.md open question 1 with a counted, dated dataset instead
+of a fee-revenue inference: how many LiquidateBorrow events has Moonwell
+on Base actually emitted, over what window, and at what RPC cost.
+
+The free-tier RPC caps eth_getLogs at EXACTLY a 10-block range (confirmed
+empirically 2026-08-22 via scripts/probe_range.py - Alchemy's own error
+message states the number). A previous version of this script queried in
+500-block windows and bisected on failure, which meant most requests were
+wasted discovering a limit that is now known in advance. This version
+queries in exactly 10-block windows from the start and threads the
+requests, since 10-block windows over any real window are tens of
+thousands of individual round trips - sequential would take hours.
+
+Queries by topic only (no address filter), then keeps events emitted by
+a Moonwell market - matches the previous script's finding that address
+filtering doesn't change the block-range cap, and topic-only lets one
+query serve all markets instead of one call per market per window.
 
 All reads. No transaction, no gas, no signature.
 
 Usage:
-    py scripts/count_liquidations.py --days 90
+    py -u scripts/count_liquidations.py --days 7 --workers 8 --out liquidations.csv
 """
 
 import argparse
+import csv
 import sys
 import time
-from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import requests
+from eth_abi import decode as abi_decode
 from web3 import Web3
 import base.config as config
 
@@ -28,14 +44,19 @@ LIQUIDATE_TOPIC = Web3.keccak(
 ).to_0x_hex()
 
 BLOCKS_PER_DAY = 43_200
-WINDOW = 500          # topic-only queries return more, so keep windows small
-MAX_RETRIES = 5
+WINDOW = 10          # the confirmed free-tier eth_getLogs cap - see module docstring
+MAX_RETRIES = 12     # the account-wide rate limit is real and sustained (measured
+                      # ~5 req/s ceiling regardless of worker count); patience here
+                      # trades wall time for a CLEAN zero-failure count instead of
+                      # a "lower bound" - see module docstring.
+
+_session = requests.Session()
 
 
 def rpc(url, method, params):
-    r = requests.post(url, json={"jsonrpc": "2.0", "id": 1,
-                                 "method": method, "params": params},
-                      timeout=30)
+    r = _session.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                  "method": method, "params": params},
+                       timeout=30)
     r.raise_for_status()
     j = r.json()
     if "error" in j:
@@ -43,25 +64,47 @@ def rpc(url, method, params):
     return j["result"]
 
 
-def get_logs(url, lo, hi):
-    """Topic-only getLogs over [lo, hi], bisecting on any failure."""
-    try:
-        return rpc(url, "eth_getLogs", [{
-            "fromBlock": hex(lo), "toBlock": hex(hi),
-            "topics": [LIQUIDATE_TOPIC],
-        }])
-    except Exception as e:
-        if "429" in str(e):
-            time.sleep(1.0)
-        if hi - lo <= 1:
-            return []
-        mid = lo + (hi - lo) // 2
-        return get_logs(url, lo, mid) + get_logs(url, mid + 1, hi)
+def get_window(url, lo, hi):
+    """Fetch one <=WINDOW-block range, retrying with backoff on rate limits.
+    Any other failure is re-raised - a gap in the count must be visible,
+    not silently dropped, or the final number is a claim without evidence."""
+    delay = 0.5
+    for attempt in range(MAX_RETRIES):
+        try:
+            return rpc(url, "eth_getLogs", [{
+                "fromBlock": hex(lo), "toBlock": hex(hi),
+                "topics": [LIQUIDATE_TOPIC],
+            }])
+        except Exception as e:
+            if "429" in str(e) or "Too Many" in str(e):
+                time.sleep(delay)
+                delay = min(delay * 2, 8.0)
+                continue
+            raise
+    raise RuntimeError("exhausted retries on window " + str((lo, hi)))
+
+
+def decode_event(log):
+    data = bytes.fromhex(log["data"][2:])
+    liquidator, borrower, repay_amount, mtoken_collateral, seize_tokens = (
+        abi_decode(["address", "address", "uint256", "address", "uint256"], data)
+    )
+    return {
+        "block_number": int(log["blockNumber"], 16),
+        "tx_hash": log["transactionHash"],
+        "market": Web3.to_checksum_address(log["address"]),
+        "liquidator": Web3.to_checksum_address(liquidator),
+        "borrower": Web3.to_checksum_address(borrower),
+        "repay_amount_raw": str(repay_amount),
+        "seize_tokens_raw": str(seize_tokens),
+    }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--days", type=float, default=1.0)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--out", default="liquidations.csv")
     args = ap.parse_args()
 
     url = config.RPC_URL
@@ -69,88 +112,94 @@ def main():
     if w3.eth.chain_id != config.CHAIN_ID:
         sys.exit("Wrong chain")
 
-    # Set of Moonwell markets, lowercased for comparison.
     comptroller = w3.eth.contract(
         address=Web3.to_checksum_address(config.COMPTROLLER),
         abi=[{"inputs": [], "name": "getAllMarkets",
               "outputs": [{"name": "", "type": "address[]"}],
               "stateMutability": "view", "type": "function"}])
     markets = {m.lower() for m in comptroller.functions.getAllMarkets().call()}
-    print("Moonwell markets:", len(markets))
+    print("Moonwell markets:", len(markets), flush=True)
 
-    head = int(rpc(url, "eth_blockNumber", []), 16)
-    floor = max(0, head - args.days * BLOCKS_PER_DAY)
-    print("Scanning blocks", format(floor, ","), "to", format(head, ","),
-          "(~" + str(args.days) + " days)\n")
+    head = w3.eth.block_number
+    span = int(args.days * BLOCKS_PER_DAY)
+    floor = max(0, head - span)
+    n_windows = (span + WINDOW - 1) // WINDOW
+    print(f"Scanning blocks {floor:,} to {head:,} (~{args.days:g} days, "
+          f"{n_windows:,} windows of {WINDOW} blocks, {args.workers} workers)",
+          flush=True)
 
-    borrower_counts = Counter()
-    market_counts = Counter()
-    total = 0
-    non_moonwell = 0
-
+    windows = []
     hi = head
-    last_report = head
     while hi >= floor:
         lo = max(floor, hi - WINDOW + 1)
-        for log in get_logs(url, lo, hi):
-            emitter = log["address"].lower()
-            if emitter not in markets:
-                non_moonwell += 1
-                continue
-            data = bytes.fromhex(log["data"][2:])
-            borrower = Web3.to_checksum_address("0x" + data[44:64].hex())
-            borrower_counts[borrower] += 1
-            market_counts[emitter] += 1
-            total += 1
-        # progress every ~200k blocks
-        if last_report - hi >= 200_000:
-            print("  ...through block", format(hi, ","),
-                  "|", total, "Moonwell liquidations so far")
-            last_report = hi
+        windows.append((lo, hi))
         hi = lo - 1
 
-    distinct = len(borrower_counts)
-    repeats = sum(1 for c in borrower_counts.values() if c > 1)
+    events = []
+    failures = []
+    start = time.perf_counter()
+    done = 0
+    report_every = max(1, len(windows) // 20)
 
-    print()
-    print("=" * 56)
-    print("RESULTS over ~" + str(args.days) + " days")
-    print("=" * 56)
-    print("  Moonwell liquidation events:   " + str(total))
-    print("  distinct liquidated wallets:   " + str(distinct))
-    print("  wallets liquidated >1 time:    " + str(repeats))
-    print("  (non-Moonwell events ignored:  " + str(non_moonwell) + ")")
-    print()
-
-    if market_counts:
-        print("  by market:")
-        sym_abi = [{"inputs": [], "name": "symbol",
-                    "outputs": [{"name": "", "type": "string"}],
-                    "stateMutability": "view", "type": "function"}]
-        for m, c in market_counts.most_common():
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(get_window, url, lo, hi): (lo, hi)
+                   for lo, hi in windows}
+        for fut in as_completed(futures):
+            lo, hi = futures[fut]
+            done += 1
             try:
-                s = w3.eth.contract(address=Web3.to_checksum_address(m),
-                                    abi=sym_abi).functions.symbol().call()
-            except Exception:
-                s = m[:10]
-            print("    " + s.ljust(12) + str(c))
-        print()
+                logs = fut.result()
+                for log in logs:
+                    if log["address"].lower() in markets:
+                        events.append(decode_event(log))
+            except Exception as e:
+                failures.append((lo, hi, str(e)[:120]))
 
-    print("FEASIBILITY (hurdle model on Base)")
-    print("  Reference: Achutha et al. trained loss-severity on 139 wallets")
-    print("  after filtering, from 6 years of Compound V2.\n")
-    if distinct == 0:
-        print("  -> ZERO on this window. Widen --days.")
-    elif distinct < 50:
-        print("  -> THIN (" + str(distinct) + "). Ship triage; defer model.")
-    elif distinct < 200:
-        print("  -> MARGINAL (" + str(distinct) + "). PD plausible, LGD fragile.")
-    else:
-        print("  -> VIABLE (" + str(distinct) + "). Both stages attemptable.")
+            if done % report_every == 0 or done == len(windows):
+                elapsed = time.perf_counter() - start
+                rate = done / elapsed if elapsed > 0 else 0
+                print(f"  {done:,}/{len(windows):,} windows | "
+                      f"{len(events)} events so far | "
+                      f"{rate:.1f} windows/s | {elapsed:.0f}s elapsed",
+                      flush=True)
 
-    if distinct > 0:
-        print("\n  Extrapolated: ~" + str(int(distinct * 365 / args.days)) +
-              " distinct wallets/year")
+    elapsed = time.perf_counter() - start
+
+    events.sort(key=lambda e: e["block_number"])
+    with open(args.out, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "block_number", "tx_hash", "market", "liquidator", "borrower",
+            "repay_amount_raw", "seize_tokens_raw",
+        ])
+        writer.writeheader()
+        writer.writerows(events)
+
+    distinct_borrowers = len({e["borrower"] for e in events})
+
+    print()
+    print("=" * 60)
+    print(f"RESULTS over ~{args.days:g} days (blocks {floor:,}-{head:,})")
+    print("=" * 60)
+    print(f"  windows queried:            {len(windows):,}")
+    print(f"  windows failed:             {len(failures)}")
+    print(f"  elapsed:                    {elapsed:.0f}s "
+          f"({len(windows) / elapsed:.1f} windows/s)")
+    print(f"  Moonwell liquidation events: {len(events)}")
+    print(f"  distinct liquidated wallets: {distinct_borrowers}")
+    print(f"  CSV written:                {args.out}")
+    if failures:
+        print(f"\n  WARNING: {len(failures)} windows never succeeded - the "
+              f"count above is a LOWER BOUND, not exact. First failure:")
+        print(f"    {failures[0]}")
+    print()
+
+    if len(windows) > 0 and elapsed > 0:
+        rate = len(windows) / elapsed
+        full_year_windows = (365 * BLOCKS_PER_DAY) / WINDOW
+        print(f"  At this measured rate ({rate:.1f} windows/s, "
+              f"{args.workers} workers), a full year would take "
+              f"~{full_year_windows / rate / 60:.0f} minutes of wall time "
+              f"and ~{full_year_windows:,.0f} RPC requests.")
 
 
 if __name__ == "__main__":

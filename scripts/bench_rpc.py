@@ -2,7 +2,8 @@
 
 import sys
 import time
-sys.path.insert(0, "../src")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from web3 import Web3
 import base.config as config
