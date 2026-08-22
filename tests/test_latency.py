@@ -24,8 +24,16 @@ import base.config as config
 from base.rpc import BaseRPCClient
 from scoring.features import extract_features
 
-# A wallet with an active Moonwell position, confirmed 2026-08-15.
-TEST_WALLET = "0xAA503ae37ba4A6FCC2fD6CC3F3Dc776Ab11B7b67"
+# A wallet with an active Moonwell position, confirmed 2026-08-22.
+# Collateral spread across 8 markets, debt in a 9th - a more thorough
+# arithmetic exercise than a single-collateral/single-debt position.
+# The previous reference wallet (0xAA503ae3...) closed its position
+# entirely since it was chosen on 2026-08-15, which is exactly why this
+# comment carries a confirmation date: a hardcoded wallet is a liability
+# that decays, not a one-time fix. If this one closes out too, use
+# scripts/find_borrowers.py to find a live replacement, then verify with
+# `pytest tests/test_latency.py -m live -s` before trusting the new one.
+TEST_WALLET = "0xEE0126C2c78C02eD9C128B4905FCE387e4326E66"
 
 P95_TARGET_MS = 500
 SAMPLES = 10
