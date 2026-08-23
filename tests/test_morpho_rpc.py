@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from morpho.rpc import shares_to_assets_up, build_market_position
+from base.rpc import WalletPosition
 
 
 def test_shares_to_assets_up_rounds_up_not_down():
@@ -63,6 +64,49 @@ def test_build_market_position_with_no_debt():
     )
     assert position.debt_usd == 0.0
     assert position.borrowed_underlying == 0.0
+
+
+def test_healthy_position_is_not_underwater():
+    market = build_market_position(
+        market_id_hex="0xtest",
+        collateral_raw=100_000_000,          # 1.0 cbBTC
+        borrowed_assets_raw=50_000_000_000,  # $50,000 - well under 86% LLTV
+        collateral_price_1e36=10 ** 39,       # $100,000/BTC
+        collateral_decimals=8,
+        loan_decimals=6,
+    )
+    weighted = market.weighted_collateral_usd
+    debt = market.debt_usd
+    position = WalletPosition(
+        wallet_address="0x" + "aa" * 20, block_number=1, markets=[market],
+        reported_liquidity_usd=max(0.0, weighted - debt),
+        reported_shortfall_usd=max(0.0, debt - weighted),
+    )
+    assert position.is_underwater is False
+
+
+def test_underwater_position_is_flagged():
+    """Debt exceeds weighted collateral (86,000 * 0.86 = 73,960 < 80,000
+    borrowed) - must be flagged, not silently reported healthy the way
+    the None-collateral-factor and not-entered-market bugs silently
+    reported healthy in the Moonwell path."""
+    market = build_market_position(
+        market_id_hex="0xtest",
+        collateral_raw=100_000_000,          # 1.0 cbBTC = $100,000 @ this price
+        borrowed_assets_raw=95_000_000_000,  # $95,000 > 86,000 LLTV threshold
+        collateral_price_1e36=10 ** 39,
+        collateral_decimals=8,
+        loan_decimals=6,
+    )
+    weighted = market.weighted_collateral_usd
+    debt = market.debt_usd
+    assert debt > weighted  # sanity check on the test's own premise
+    position = WalletPosition(
+        wallet_address="0x" + "aa" * 20, block_number=1, markets=[market],
+        reported_liquidity_usd=max(0.0, weighted - debt),
+        reported_shortfall_usd=max(0.0, debt - weighted),
+    )
+    assert position.is_underwater is True
 
 
 @pytest.mark.live
