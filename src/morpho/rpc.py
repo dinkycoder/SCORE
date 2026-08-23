@@ -159,6 +159,16 @@ ORACLE_ABI = [
      "stateMutability": "view", "type": "function"},
 ]
 
+# Not in base.rpc.MULTICALL3_ABI (the Moonwell client never needed it) - a
+# local addition so the current block's timestamp can be batched into the
+# SAME aggregate3 call as everything else, rather than a follow-up
+# eth_getBlockByNumber. See get_wallet_position's staleness comment.
+MULTICALL3_TIMESTAMP_ABI = [
+    {"inputs": [], "name": "getCurrentBlockTimestamp",
+     "outputs": [{"name": "timestamp", "type": "uint256"}],
+     "stateMutability": "view", "type": "function"},
+]
+
 
 class MorphoRPCClient:
     """
@@ -178,6 +188,13 @@ class MorphoRPCClient:
 
         self.multicall = self.w3.eth.contract(
             address=Web3.to_checksum_address(MULTICALL3), abi=MULTICALL3_ABI)
+        # Same address, ABI extended with getCurrentBlockTimestamp - only
+        # used to ENCODE that one extra call; execution still goes through
+        # self.multicall.functions.aggregate3(...), which doesn't care
+        # which contract object produced the calldata.
+        self._multicall_ext = self.w3.eth.contract(
+            address=Web3.to_checksum_address(MULTICALL3),
+            abi=MULTICALL3_ABI + MULTICALL3_TIMESTAMP_ABI)
         self.morpho = self.w3.eth.contract(
             address=Web3.to_checksum_address(config.MORPHO_BLUE_ADDRESS),
             abi=MORPHO_ABI)
@@ -199,9 +216,12 @@ class MorphoRPCClient:
         morpho_address = Web3.to_checksum_address(config.MORPHO_BLUE_ADDRESS)
         oracle_address = Web3.to_checksum_address(config.ORACLE)
 
+        multicall_address = Web3.to_checksum_address(MULTICALL3)
         calls: List[Tuple[str, bool, str]] = [
-            (Web3.to_checksum_address(MULTICALL3), False,
+            (multicall_address, False,
              self._encode(self.multicall, "getBlockNumber")),
+            (multicall_address, False,
+             self._encode(self._multicall_ext, "getCurrentBlockTimestamp")),
             (morpho_address, False,
              self._encode(self.morpho, "position", [market_id, addr])),
             (morpho_address, False,
@@ -212,8 +232,9 @@ class MorphoRPCClient:
         results = self.multicall.functions.aggregate3(calls).call()
 
         block_number = abi_decode(["uint256"], results[0][1])[0]
+        block_timestamp = abi_decode(["uint256"], results[1][1])[0]
         _supply_shares, borrow_shares, collateral_raw = abi_decode(
-            ["uint256", "uint128", "uint128"], results[1][1])
+            ["uint256", "uint128", "uint128"], results[2][1])
         # totalBorrowAssets/totalBorrowShares (and lastUpdate) are read
         # directly from storage by this pure eth_call - Morpho Blue only
         # runs its interest-accrual step (_accrueInterest) inside
@@ -230,23 +251,18 @@ class MorphoRPCClient:
         (_total_supply_assets, _total_supply_shares,
          total_borrow_assets, total_borrow_shares,
          last_update, _fee) = abi_decode(
-            ["uint128"] * 6, results[2][1])
-        price_1e36 = abi_decode(["uint256"], results[3][1])[0]
+            ["uint128"] * 6, results[3][1])
+        price_1e36 = abi_decode(["uint256"], results[4][1])[0]
 
-        try:
-            current_timestamp = self.w3.eth.get_block(block_number)["timestamp"]
-            logger.debug(
-                "Morpho market %s: lastUpdate=%d, block %d timestamp=%d, "
-                "staleness=%ds",
-                market_id, last_update, block_number, current_timestamp,
-                current_timestamp - last_update,
-            )
-        except Exception:
-            logger.debug(
-                "Morpho market %s: lastUpdate=%d (could not fetch block "
-                "%d timestamp to compute staleness)",
-                market_id, last_update, block_number,
-            )
+        # block_timestamp came from the SAME aggregate3 batch above
+        # (getCurrentBlockTimestamp) - no follow-up call, so this logging
+        # never costs a second round trip.
+        logger.debug(
+            "Morpho market %s: lastUpdate=%d, block %d timestamp=%d, "
+            "staleness=%ds",
+            market_id, last_update, block_number, block_timestamp,
+            block_timestamp - last_update,
+        )
 
         if is_empty_position(collateral_raw, borrow_shares):
             # No position on this market at all - mirror
