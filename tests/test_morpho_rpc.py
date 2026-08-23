@@ -63,3 +63,30 @@ def test_build_market_position_with_no_debt():
     )
     assert position.debt_usd == 0.0
     assert position.borrowed_underlying == 0.0
+
+
+@pytest.mark.live
+def test_get_wallet_position_reads_a_real_open_position():
+    """A real wallet with a confirmed open position on the cbBTC/USDC
+    market as of 2026-08-23 (found via Borrow-event scan, position()
+    confirmed non-zero at the time - see
+    docs/superpowers/specs/2026-08-23-morpho-reader-design.md for the
+    method; if this wallet has since closed out, use the same
+    Borrow-event-scan technique to find a replacement, the way
+    tests/test_latency.py's TEST_WALLET was replaced)."""
+    from morpho.rpc import MorphoRPCClient
+
+    client = MorphoRPCClient()
+    position = client.get_wallet_position("0x04a9530da51Eb174153F150FfDF103B368c332E5")
+
+    assert len(position.markets) == 1
+    market = position.markets[0]
+    assert market.symbol == "cbBTC"
+    assert market.supplied_underlying > 0
+    assert market.debt_usd > 0
+    # Sanity bound, not an exact figure - cbBTC/BTC has traded well
+    # within this band across 2025-2026; catches a decimals/scaling bug
+    # that would produce an implausible price, without hardcoding
+    # today's exact BTC price into a test that will go stale.
+    implied_btc_price = market.collateral_usd / market.supplied_underlying
+    assert 10_000 < implied_btc_price < 500_000
