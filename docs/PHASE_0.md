@@ -189,6 +189,61 @@ requires API keys. This is a named Phase 1 cost, not a solved problem.
 - HTTP interface returning measured features (/position, /capabilities,
   /health), with no unearned model claims
 
+### Morpho reader (cbBTC/USDC, Base)
+
+Complete for the single-market scope defined in
+`docs/superpowers/specs/2026-08-23-morpho-reader-design.md`: `MorphoRPCClient`
+(`src/morpho/rpc.py`) reads one wallet's position on Morpho Blue's
+cbBTC/USDC market on Base in one Multicall3 round trip. The raw
+shares/collateral it decodes convert into the *same*
+`WalletPosition`/`MarketPosition` dataclasses the Moonwell path uses, so
+`extract_features` required zero Morpho-specific changes.
+
+**Manual cross-check (2026-08-23).** Ran the live client (Task 5, Step 1)
+against wallet `0x04a9530da51Eb174153F150FfDF103B368c332E5` (an open
+position found via a `Borrow`-event scan) and independently queried
+Morpho's own public GraphQL API (`https://blue-api.morpho.org/graphql`,
+`marketPosition` query) for the same wallet and market ID, roughly 40
+seconds apart in wall time:
+
+| Field | Our client | blue-api.morpho.org | Difference |
+|---|---|---|---|
+| Collateral, raw cbBTC units | 9,257,470 | 9,257,470 | exact match |
+| `collateral_usd` | $7,165.18 | $7,165.68 | 0.007% |
+| `debt_usd` | $3,941.27 | $3,940.83 | 0.011% |
+| Health factor (weighted collateral / debt) | 1.563471 | 1.563471 | ~0.00002% |
+
+The raw collateral share count matched exactly. The sub-0.02% gaps in the
+USD figures are consistent with the ~36 seconds between the two queries'
+timestamps (our RPC read's `market().lastUpdate` was `1787518229`; the
+GraphQL response's state `timestamp` was `1787518193`) - ordinary interest
+accrual and oracle price movement over that interval, not a decoding or
+scaling error. This is the one-time manual cross-check design spec §8
+calls for; it is a snapshot exercise, not a repeating automated test,
+because no automatable independent source exists for Morpho (next
+paragraph explains why).
+
+**Permanent limitation, not a TODO** (design spec §6): unlike Moonwell's
+Comptroller, which exposes `getAccountLiquidity` as a second,
+independently-computed health check, Morpho Blue's `position()` call
+returns only raw `supplyShares`/`borrowShares`/`collateral` - there is no
+protocol-side health computation to read. `WalletPosition`'s
+`reported_liquidity_usd`/`reported_shortfall_usd` fields are therefore
+populated, for Morpho positions only, from our *own* derived
+`weighted_collateral_usd - debt_usd`, not an independent source. This
+makes `is_underwater` behave correctly instead of silently defaulting to
+"safe," but it is a strictly weaker verification claim than Moonwell's
+Comptroller-checked figures, and it stays that way for as long as Morpho
+Blue's public interface has no on-chain health view to check against -
+this is not something a future patch is expected to close.
+
+**Out of scope**, unchanged by this work (design spec §9): market
+discovery/enumeration across all of Morpho, any Morpho market besides
+cbBTC/USDC, wiring into the `/position` HTTP endpoint or `/capabilities`,
+any write path (`CreditScorer` integration) for Morpho-sourced positions,
+and Aave (contingent on a specific lender using it, per the protocol
+strategy above - not triggered by this work).
+
 ### Measured
 
 | Metric | Value | Target |
@@ -228,7 +283,10 @@ current figure is within 7 ms of the network floor.
     unresolved before a real deployment holds anything consequential.
 - Historical liquidation extraction, pending the infrastructure resolution
   above (Phase 1)
-- Morpho reader for the demonstration venue (Phase 1)
+- Morpho reader for the demonstration venue: the read-only, single-market
+  (cbBTC/USDC) reader itself is complete (see Status above). Still
+  outstanding: market discovery across other Morpho markets, wiring into
+  `/position`/`/capabilities`, and any write path (Phase 1)
 - Lender validation (weeks 6-7)
 - Base Ecosystem Fund application (week 8)
 
