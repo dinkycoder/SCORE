@@ -11,6 +11,7 @@ contract CreditScorerTest is Test {
     address internal stranger = address(0xDEAD);
 
     event ScoreUpdated(address indexed wallet, uint256 creditScore, uint256 timestamp);
+    event ExposureUpdated(address indexed wallet, uint256 ead, uint256 timestamp);
 
     function setUp() public {
         creditScorer = new CreditScorer();
@@ -149,5 +150,90 @@ contract CreditScorerTest is Test {
         assertEq(score.ead, ead);
         assertEq(score.creditScore, creditScoreValue);
         assertEq(score.modelVersion, 1);
+    }
+
+    // -- updateExposure: EAD-only writes, no model exists yet -------------------
+    //
+    // No PD/LGD model has been trained (see README/COMPLIANCE.md - this project
+    // does not claim a model that doesn't exist). updateExposure writes only
+    // the measured solvency component and leaves pd/lgd/creditScore at 0 AND
+    // modelVersion at 0, so a reader can always tell "not computed" from "a
+    // real model scored this at zero risk" - the two are never the same write.
+
+    function test_UpdateExposureStoresEadOnlyAndLeavesModelFieldsZero() public {
+        creditScorer.updateExposure(wallet, 12_345);
+
+        CreditScorer.Score memory score = creditScorer.getScore(wallet);
+        assertEq(score.ead, 12_345);
+        assertEq(score.pd, 0);
+        assertEq(score.lgd, 0);
+        assertEq(score.creditScore, 0);
+        assertEq(score.modelVersion, 0);
+    }
+
+    function test_UpdateExposureSetsTimestamp() public {
+        creditScorer.updateExposure(wallet, 1);
+        assertEq(creditScorer.getScore(wallet).timestamp, block.timestamp);
+    }
+
+    function test_UpdateExposureTimestampDistinguishesFromNeverTouched() public view {
+        // A never-touched wallet has timestamp == 0 (mapping default). Combined
+        // with the case above (touched, timestamp != 0, modelVersion == 0),
+        // this is how "no model yet" and "never scored at all" stay
+        // distinguishable through the same struct without an extra field.
+        assertEq(creditScorer.getScore(stranger).timestamp, 0);
+    }
+
+    function test_UpdateExposureIncrementsScoreCount() public {
+        creditScorer.updateExposure(wallet, 1);
+        assertEq(creditScorer.scoreCount(), 1);
+    }
+
+    function test_UpdateExposureEmitsExposureUpdatedNotScoreUpdated() public {
+        // A distinct event, not ScoreUpdated with creditScore=0 - a subscriber
+        // watching ScoreUpdated must never see an EAD-only write and mistake
+        // the 0 for a real computed score.
+        vm.expectEmit(true, false, false, true, address(creditScorer));
+        emit ExposureUpdated(wallet, 12_345, block.timestamp);
+        creditScorer.updateExposure(wallet, 12_345);
+    }
+
+    function test_UpdateExposureRevertsForNonScorer() public {
+        vm.prank(stranger);
+        vm.expectRevert("Only scorer can update scores");
+        creditScorer.updateExposure(wallet, 1);
+    }
+
+    function test_UpdateExposureRevertsForZeroAddress() public {
+        vm.expectRevert("Invalid wallet address");
+        creditScorer.updateExposure(address(0), 1);
+    }
+
+    function test_UpdateScoreAfterUpdateExposureUpgradesToRealModel() public {
+        // The natural lifecycle: exposure now, a real model later. Confirms
+        // the later updateScore call fully overwrites the EAD-only state
+        // rather than merging with it or being blocked by it.
+        creditScorer.updateExposure(wallet, 12_345);
+        assertEq(creditScorer.getScore(wallet).modelVersion, 0);
+
+        creditScorer.updateScore(wallet, 100, 200, 12_345, 750);
+
+        CreditScorer.Score memory score = creditScorer.getScore(wallet);
+        assertEq(score.modelVersion, 1);
+        assertEq(score.pd, 100);
+        assertEq(score.creditScore, 750);
+    }
+
+    function testFuzz_UpdateExposureRoundTripsArbitraryEad(address fuzzWallet, uint256 ead) public {
+        vm.assume(fuzzWallet != address(0));
+
+        creditScorer.updateExposure(fuzzWallet, ead);
+        CreditScorer.Score memory score = creditScorer.getScore(fuzzWallet);
+
+        assertEq(score.ead, ead);
+        assertEq(score.modelVersion, 0);
+        assertEq(score.pd, 0);
+        assertEq(score.lgd, 0);
+        assertEq(score.creditScore, 0);
     }
 }

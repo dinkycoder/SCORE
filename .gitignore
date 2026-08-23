@@ -17,3 +17,8 @@ node_modules/
 /contracts/out/
 /contracts/cache/
 /contracts/lib/
+# Chain 31337 is anvil's local-only test chain ID - these records are from
+# test runs, never a real deployment. Real deployments (Base mainnet 8453,
+# Sepolia 84532) belong in git as the audit trail; this exclusion is
+# deliberately narrow so a real one is never accidentally ignored.
+/contracts/broadcast/*/31337/

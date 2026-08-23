@@ -38,6 +38,15 @@ MARKETS = {
 # to 1.000000 on wallet 0xAA503ae3. USD values are scaled by 1e18.
 WAD = 10 ** 18
 
+# --- CreditScorer (write path) --------------------------------------------
+# Both unset until a real deployment happens (see
+# contracts/script/DeployCreditScorer.s.sol). Reading (get_wallet_position,
+# extract_features) needs neither and must never be blocked by their
+# absence - only src/onchain/writer.py does, and it fails loud rather than
+# writing silently misconfigured.
+CREDIT_SCORER_ADDRESS = os.getenv("CREDIT_SCORER_ADDRESS") or None
+SCORER_PRIVATE_KEY = os.getenv("SCORER_PRIVATE_KEY") or None
+
 
 def describe() -> str:
     """Human-readable config summary, with the API key masked."""
