@@ -92,12 +92,46 @@ one market:
 - `is_entered=True` always — Morpho Blue has no separate "enter market"
   step; supplying collateral to an isolated market *is* entering it.
 
-This means `src/scoring/features.py::extract_features` needs **zero
-changes**. `market_count`, `volatility_mismatch`, `capacity_used`,
-`headroom`, `debt_rise_to_liquidation`, `degraded` all fall out for free,
-and Morpho-sourced positions flow through the same tested pipeline (and
+This means `src/scoring/features.py::extract_features` needs **zero code
+changes** — Morpho-sourced positions flow through the same pipeline (and
 eventually the same `/position` response shape and `CreditScorer` write
 path) as Moonwell ones, with no protocol-specific branching downstream.
+But "zero changes" is not the same claim as "every field means the same
+thing it does for Moonwell." Split by outcome:
+
+**Reuse cleanly** (behave the way their docstrings describe, for the
+reason those docstrings give): `capacity_used`, `headroom`,
+`debt_rise_to_liquidation`, `degraded`, `is_underwater`. Each of these
+depends on `weighted_collateral_usd` vs `debt_usd`, which is exactly what
+a single-`MarketPosition` representation with `collateral_factor=LLTV`
+computes correctly.
+
+**Do NOT reuse cleanly** — computed without error, but the *value* is
+degenerate or actively wrong for what the field is documented to mean:
+
+- `volatility_mismatch` is **structurally always `False`** for every
+  Morpho position from this client, regardless of the actual position.
+  `extract_features` detects a mismatch by comparing the set of symbols
+  with `collateral_usd > 0` against the set of symbols with `debt_usd >
+  0`. Because `build_market_position` packs both collateral AND debt
+  into one `MarketPosition` under a single symbol (`"cbBTC"`), those two
+  sets are always the same one-element set — even for this market, which
+  *is* a volatility mismatch by construction (volatile cbBTC collateral
+  against stable USDC debt), exactly the case this feature exists to
+  catch. Moonwell doesn't hit this because each mToken is its own
+  `MarketPosition`, so collateral and debt can land on different
+  symbols. This cannot be fixed without either changing
+  `extract_features()` (out of scope — it's shared, unmodified code) or
+  splitting a Morpho position into two synthetic `MarketPosition`s
+  (a larger design change, not attempted here). It is a permanent,
+  documented limitation (see `src/morpho/rpc.py`'s module docstring),
+  not a bug silently shipped as a correct-looking `False`.
+- `market_count` is **degenerate**, not a "concentration proxy" the way
+  it is for a multi-market Moonwell wallet: it is always exactly 1 when
+  this client finds a position, and 0 for a wallet with no position on
+  this market at all (regardless of how diversified that wallet's
+  Morpho activity is across markets this client doesn't read — recall
+  §2's single-market scope).
 
 ## 6. The one place this reuse gets awkward: `is_underwater`
 
@@ -144,7 +178,15 @@ reading source.
 - **Offline**: unit tests for `MorphoRPCClient`'s own decode/scaling logic
   (raw shares/collateral → `MarketPosition`, oracle price scaling) against
   hand-computed synthetic values — mirrors `test_features.py`'s pattern.
-  `extract_features` itself needs no new tests, since it's unchanged (§5).
+  `extract_features` needs no CODE changes, since it's unchanged (§5), but
+  it still needs at least one test that actually calls it on a
+  Morpho-sourced `WalletPosition` — an early version of this plan shipped
+  without one, which is exactly how the `volatility_mismatch` limitation
+  in §5 went undetected across 5 individual task reviews. That test now
+  exists (`tests/test_morpho_rpc.py::test_extract_features_on_morpho_position`)
+  and asserts the full resulting `CreditFeatures`, including
+  `volatility_mismatch is False` as an explicit, intentional assertion of
+  the known limitation, not a silent gap.
 - **Live** (marked `live`, same convention as the existing Moonwell
   tests): reads the real cbBTC/USDC market for a real wallet with an open
   position, confirms no errors and sane, internally consistent output.

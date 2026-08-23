@@ -4,8 +4,38 @@ Base (cbBTC/USDC). See docs/superpowers/specs/2026-08-23-morpho-reader-design.md
 for why this market, why single-market scope, and why
 reported_liquidity_usd/reported_shortfall_usd here are NOT the same kind
 of independent protocol check Moonwell's getAccountLiquidity provides.
+
+Known, permanent limitations of reusing extract_features() unchanged
+(src/scoring/features.py cannot be modified by this plan):
+
+- `volatility_mismatch` is NOT meaningful for Morpho-sourced positions and
+  will always report False. `build_market_position` packs both collateral
+  AND debt into a single MarketPosition under one symbol ("cbBTC"), so
+  extract_features()'s collateral-symbols-vs-debt-symbols comparison
+  always sees the same one-element set on both sides, even though this
+  market IS a volatility mismatch by construction (volatile cbBTC
+  collateral against stable USDC debt) - exactly the case the feature
+  exists to catch. Moonwell avoids this because each mToken is its own
+  MarketPosition, so collateral and debt can land on different symbols.
+  This is a structural consequence of the single-MarketPosition
+  representation, not a bug to be silently patched here.
+- `market_count` is degenerate for Morpho: it is always 1 whenever a
+  position exists (this client only ever reads one market), and 0 for an
+  empty wallet (see the empty-position handling in get_wallet_position) -
+  it does not carry the "concentration proxy" meaning it has for a
+  multi-market Moonwell wallet.
+- The `degraded` field's docstring in features.py states "is_underwater
+  is unaffected: it comes from the protocol's own getAccountLiquidity
+  call" - true for Moonwell, NOT true for Morpho, where is_underwater is
+  populated from this client's own derived weighted_collateral_usd minus
+  debt_usd (see get_wallet_position below and design spec §6), not from
+  any protocol-side call. In practice `degraded` can never be True for a
+  Morpho-sourced position anyway, since collateral_factor is always the
+  hardcoded LLTV constant, never None - but the docstring's general claim
+  about *why* is_underwater is safe does not hold for this path.
 """
 
+import logging
 from typing import List, Optional, Tuple
 
 from eth_abi import decode as abi_decode
@@ -16,6 +46,8 @@ from base import config as base_config
 
 from . import config
 
+logger = logging.getLogger(__name__)
+
 VIRTUAL_SHARES = 10 ** 6
 VIRTUAL_ASSETS = 1
 
@@ -25,14 +57,35 @@ def shares_to_assets_up(shares: int, total_assets: int, total_shares: int) -> in
     Morpho Blue's toAssetsUp (SharesMathLib): converts a shares balance to
     the underlying asset amount it represents, rounded UP - the same
     direction Morpho itself uses for a borrower's owed amount, so a
-    wallet's debt is never understated by rounding. The
+    wallet's debt is never understated by ROUNDING. The
     +VIRTUAL_ASSETS/+VIRTUAL_SHARES offsets match Morpho Blue's own
     formula exactly (an anti-inflation-attack measure active from
     genesis, not an approximation).
+
+    This is a claim about rounding direction only, not a blanket accuracy
+    guarantee: `total_assets`/`total_shares` themselves come from
+    `market()`, which is read as-of that market's last on-chain accrual
+    (`lastUpdate`), not re-accrued to the current block by this call (see
+    the comment on the `market()` decode in get_wallet_position). Debt can
+    therefore still be understated by un-accrued interest, a separate,
+    documented staleness limitation - not something this rounding
+    direction fixes.
     """
     numerator = shares * (total_assets + VIRTUAL_ASSETS)
     denominator = total_shares + VIRTUAL_SHARES
     return -(-numerator // denominator)  # ceiling division, exact integers
+
+
+def is_empty_position(collateral_raw: int, borrow_shares: int) -> bool:
+    """
+    True when a wallet has no position on this market at all (no
+    collateral supplied AND no borrow shares outstanding). Pulled out as
+    its own function so the empty-wallet skip in get_wallet_position -
+    mirroring BaseRPCClient.get_wallet_position's `if m_bal == 0 and
+    borrow_bal == 0: continue` - is testable without a live zero-position
+    wallet.
+    """
+    return collateral_raw == 0 and borrow_shares == 0
 
 
 def build_market_position(
@@ -143,15 +196,17 @@ class MorphoRPCClient:
         """Full position on the cbBTC/USDC market, in ONE round trip."""
         addr = Web3.to_checksum_address(wallet)
         market_id = config.MARKET_ID
+        morpho_address = Web3.to_checksum_address(config.MORPHO_BLUE_ADDRESS)
+        oracle_address = Web3.to_checksum_address(config.ORACLE)
 
         calls: List[Tuple[str, bool, str]] = [
             (Web3.to_checksum_address(MULTICALL3), False,
              self._encode(self.multicall, "getBlockNumber")),
-            (config.MORPHO_BLUE_ADDRESS, False,
+            (morpho_address, False,
              self._encode(self.morpho, "position", [market_id, addr])),
-            (config.MORPHO_BLUE_ADDRESS, False,
+            (morpho_address, False,
              self._encode(self.morpho, "market", [market_id])),
-            (config.ORACLE, False,
+            (oracle_address, False,
              self._encode(self.oracle, "price")),
         ]
         results = self.multicall.functions.aggregate3(calls).call()
@@ -159,11 +214,51 @@ class MorphoRPCClient:
         block_number = abi_decode(["uint256"], results[0][1])[0]
         _supply_shares, borrow_shares, collateral_raw = abi_decode(
             ["uint256", "uint128", "uint128"], results[1][1])
+        # totalBorrowAssets/totalBorrowShares (and lastUpdate) are read
+        # directly from storage by this pure eth_call - Morpho Blue only
+        # runs its interest-accrual step (_accrueInterest) inside
+        # state-changing calls, never on a view read. So these values
+        # reflect whatever was last stored as of `last_update`, not
+        # interest accrued up to the current block. On this specific
+        # high-activity market that gap is typically seconds (see the
+        # staleness log below), not bounded by any code guarantee.
+        # Simulating Morpho's Adaptive Curve IRM to re-accrue to the
+        # current block is out of scope for this plan - debt derived from
+        # these values can be understated by that un-accrued interest,
+        # independent of (and in addition to) the rounding direction
+        # shares_to_assets_up already guarantees.
         (_total_supply_assets, _total_supply_shares,
          total_borrow_assets, total_borrow_shares,
-         _last_update, _fee) = abi_decode(
+         last_update, _fee) = abi_decode(
             ["uint128"] * 6, results[2][1])
         price_1e36 = abi_decode(["uint256"], results[3][1])[0]
+
+        try:
+            current_timestamp = self.w3.eth.get_block(block_number)["timestamp"]
+            logger.debug(
+                "Morpho market %s: lastUpdate=%d, block %d timestamp=%d, "
+                "staleness=%ds",
+                market_id, last_update, block_number, current_timestamp,
+                current_timestamp - last_update,
+            )
+        except Exception:
+            logger.debug(
+                "Morpho market %s: lastUpdate=%d (could not fetch block "
+                "%d timestamp to compute staleness)",
+                market_id, last_update, block_number,
+            )
+
+        if is_empty_position(collateral_raw, borrow_shares):
+            # No position on this market at all - mirror
+            # BaseRPCClient.get_wallet_position's skip of empty markets so
+            # market_count reports 0, not a phantom all-zero market.
+            return WalletPosition(
+                wallet_address=addr,
+                block_number=block_number,
+                markets=[],
+                reported_liquidity_usd=0.0,
+                reported_shortfall_usd=0.0,
+            )
 
         borrowed_assets_raw = shares_to_assets_up(
             borrow_shares, total_borrow_assets, total_borrow_shares)

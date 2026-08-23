@@ -197,7 +197,20 @@ Complete for the single-market scope defined in
 cbBTC/USDC market on Base in one Multicall3 round trip. The raw
 shares/collateral it decodes convert into the *same*
 `WalletPosition`/`MarketPosition` dataclasses the Moonwell path uses, so
-`extract_features` required zero Morpho-specific changes.
+`extract_features` required zero Morpho-specific code changes. Not every
+feature it produces carries its usual meaning, though: `capacity_used`,
+`headroom`, `debt_rise_to_liquidation`, `degraded`, and `is_underwater`
+reuse cleanly, but `volatility_mismatch` is **structurally always
+`False`** for Morpho positions (both collateral and debt land under one
+`MarketPosition`/one symbol, so the mismatch check always compares a
+set against itself), and `market_count` is degenerate (always 1 when a
+position exists, 0 otherwise) rather than a real concentration proxy.
+Both are permanent, documented limitations of reusing `extract_features`
+unchanged (see `src/morpho/rpc.py`'s module docstring and design spec
+§5), not bugs — `volatility_mismatch` in particular would otherwise
+silently under-report exactly the risk it exists to flag, since this
+market is volatile-collateral (cbBTC) against stable-debt (USDC), the
+textbook mismatch case.
 
 **Manual cross-check (2026-08-23).** Ran the live client (Task 5, Step 1)
 against wallet `0x04a9530da51Eb174153F150FfDF103B368c332E5` (an open
@@ -211,15 +224,38 @@ seconds apart in wall time:
 | Collateral, raw cbBTC units | 9,257,470 | 9,257,470 | exact match |
 | `collateral_usd` | $7,165.18 | $7,165.68 | 0.007% |
 | `debt_usd` | $3,941.27 | $3,940.83 | 0.011% |
-| Health factor (weighted collateral / debt) | 1.563471 | 1.563471 | ~0.00002% |
+| Health factor (weighted collateral / debt, recomputed from the two rows above) | 1.563471 | 1.563753 | 0.018% |
 
-The raw collateral share count matched exactly. The sub-0.02% gaps in the
-USD figures are consistent with the ~36 seconds between the two queries'
-timestamps (our RPC read's `market().lastUpdate` was `1787518229`; the
-GraphQL response's state `timestamp` was `1787518193`) - ordinary interest
-accrual and oracle price movement over that interval, not a decoding or
-scaling error. This is the one-time manual cross-check design spec §8
-calls for; it is a snapshot exercise, not a repeating automated test,
+The health-factor row is recomputed directly from each column's own
+`collateral_usd`/`debt_usd` figures above (`collateral_usd * 0.86 /
+debt_usd`), not copied from `blue-api.morpho.org`'s own opaque
+`healthFactor` field — pasting that field's value (1.563471, which
+happens to closely track our client's own weighted-collateral/debt
+ratio) next to ours made the table look like the health-factor gap was
+~0.00002% when the *displayed* collateral/debt figures in the same row
+actually imply a 0.018% gap; that was an internal inconsistency in this
+table, not a true measurement, and has been corrected.
+
+The raw collateral share count matched exactly, which is strong evidence
+`position()` decoding is correct independent of any USD/oracle math. The
+sub-0.02% gaps in the USD figures are NOT fully explained by ordinary
+interest accrual over the ~36 seconds between the two queries' timestamps
+(our RPC read's `market().lastUpdate` was `1787518229`; the GraphQL
+response's state `timestamp` was `1787518193`): the 0.011% `debt_usd` gap
+over 36 seconds would require an implied APY on the order of 9,800% on
+this USDC-denominated debt, which is not plausible for this market. A
+live USDC-price-feed explanation (`blue-api.morpho.org` valuing USDC via
+a real price feed instead of the exact $1.00 this client assumes — see
+the comment in `src/morpho/rpc.py`) was considered, but the collateral
+gap and the debt gap move in *opposite* directions relative to our
+client's figures, which rules out a single shared non-$1.00 USDC price
+factor applied uniformly to both (that would move both figures the same
+way). No single cause was confirmed from the data available. The
+sub-0.02% gaps are accepted as within the tolerance design spec §8 and
+Task 5's brief called for, without a fully pinned-down root cause — this
+is stated plainly rather than asserting an explanation that doesn't hold
+up arithmetically. This is the one-time manual cross-check design spec
+§8 calls for; it is a snapshot exercise, not a repeating automated test,
 because no automatable independent source exists for Morpho (next
 paragraph explains why).
 

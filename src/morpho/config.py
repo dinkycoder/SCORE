@@ -21,6 +21,14 @@ MORPHO_BLUE_ADDRESS = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 # checked, volatile-collateral/stable-debt like Moonwell's dominant
 # pattern).
 MARKET_ID = "0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836"
+
+# LOAN_TOKEN, COLLATERAL_TOKEN, IRM, and LLTV_WAD below are not read by
+# rpc.py at runtime (the client only needs MARKET_ID, LLTV, ORACLE, and
+# the symbol/decimals constants). They are kept anyway, intentionally,
+# as verified provenance/documentation: they are the exact
+# idToMarketParams components MARKET_ID was derived from (see design
+# spec §3), so anyone re-deriving or auditing MARKET_ID later has the
+# inputs on hand without re-querying the chain. Not dead code.
 LOAN_TOKEN = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"       # USDC
 COLLATERAL_TOKEN = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"  # cbBTC
 ORACLE = "0x663BECd10daE6C4A3Dcd89F1d76c1174199639B9"
@@ -31,5 +39,6 @@ LLTV = 0.86
 
 COLLATERAL_SYMBOL = "cbBTC"
 COLLATERAL_DECIMALS = 8
-LOAN_SYMBOL = "USDC"
+LOAN_SYMBOL = "USDC"  # not read by rpc.py either - kept for the same
+                      # provenance/documentation reason as above.
 LOAN_DECIMALS = 6
