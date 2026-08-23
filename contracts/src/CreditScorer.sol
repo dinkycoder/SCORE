@@ -13,6 +13,11 @@ contract CreditScorer {
 
     mapping(address => Score) public scores;
     address public scorer;
+
+    // Counts updateScore CALLS, not distinct wallets scored - re-scoring an
+    // already-scored wallet increments this again. There is no cheap way to
+    // track distinct wallets in a plain mapping without an extra "have we
+    // seen this address" set, which this contract does not keep.
     uint256 public scoreCount;
 
     event ScoreUpdated(

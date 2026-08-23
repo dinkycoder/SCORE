@@ -183,7 +183,9 @@ requires API keys. This is a named Phase 1 cost, not a solved problem.
   different numbers), and volatility mismatch
 - Position arithmetic verified against the Comptroller's own on-chain
   computation to a ratio of 1.000000
-- 34 tests, including a live latency gate and a live correctness gate
+- 42 tests, including a live latency gate and a live correctness gate,
+  and full coverage of the HTTP interface (/health, /capabilities,
+  /position's sanctions-fail-closed control flow, and the 404 handler)
 - HTTP interface returning measured features (/position, /capabilities,
   /health), with no unearned model claims
 
@@ -201,8 +203,20 @@ current figure is within 7 ms of the network floor.
 
 ### Outstanding
 
-- Test coverage for the HTTP interface (weeks 2-3)
-- On-chain storage contract (weeks 4-5)
+- On-chain storage contract (weeks 4-5) - CreditScorer.sol now has 14
+  Foundry tests (contracts/test/, 2 of them fuzz tests over 256 runs
+  each), verified non-vacuous by mutation (temporarily removed the
+  onlyScorer check, confirmed the access-control tests fail, restored
+  it). Still missing: a deployment script and a write path from the
+  Python pipeline - nothing in src/ calls updateScore yet. See open
+  question 3 above on the scorer-rotation decision this needs before it
+  holds anything consequential.
+  - Flagged, not fixed: `scoreCount` counts update CALLS, not distinct
+    wallets scored - re-scoring an existing wallet increments it again.
+    Nothing in the contract documents which of the two it is, so a
+    lender reading it could reasonably expect the other meaning. Locked
+    in with a regression test and a comment; left as a design question
+    since changing it is a behavior decision, not a test-coverage one.
 - Historical liquidation extraction, pending the infrastructure resolution
   above (Phase 1)
 - Morpho reader for the demonstration venue (Phase 1)
