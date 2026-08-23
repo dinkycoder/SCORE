@@ -203,20 +203,29 @@ current figure is within 7 ms of the network floor.
 
 ### Outstanding
 
-- On-chain storage contract (weeks 4-5) - CreditScorer.sol now has 14
-  Foundry tests (contracts/test/, 2 of them fuzz tests over 256 runs
-  each), verified non-vacuous by mutation (temporarily removed the
-  onlyScorer check, confirmed the access-control tests fail, restored
-  it). Still missing: a deployment script and a write path from the
-  Python pipeline - nothing in src/ calls updateScore yet. See open
-  question 3 above on the scorer-rotation decision this needs before it
-  holds anything consequential.
+- On-chain storage contract (weeks 4-5) - CreditScorer.sol now has 23
+  Foundry tests (contracts/test/, 3 fuzz tests over 256 runs each), a
+  deployment script (contracts/script/DeployCreditScorer.s.sol), and a
+  write path (src/onchain/writer.py, 5 tests). **No real deployment has
+  happened**: everything above has only ever run against a local, ephemeral
+  anvil chain (chain ID 31337) - zero real funds, zero mainnet or Sepolia
+  transactions. Deploying for real is a separate, explicit, not-yet-taken
+  step: it costs real gas and is an irreversible public action.
+  - The contract now distinguishes "no model exists yet" from "a real
+    model scored this": `updateExposure` writes only the measured EAD
+    component (modelVersion stays 0), `updateScore` writes a full result
+    (modelVersion 1). No PD/LGD model has been trained, so only
+    `updateExposure` is ever called today - the project does not write
+    placeholder pd/lgd/creditScore values that could be mistaken for a
+    real computed result.
   - Flagged, not fixed: `scoreCount` counts update CALLS, not distinct
     wallets scored - re-scoring an existing wallet increments it again.
     Nothing in the contract documents which of the two it is, so a
     lender reading it could reasonably expect the other meaning. Locked
     in with a regression test and a comment; left as a design question
     since changing it is a behavior decision, not a test-coverage one.
+  - Still open: the scorer-rotation decision (open question 3 below) -
+    unresolved before a real deployment holds anything consequential.
 - Historical liquidation extraction, pending the infrastructure resolution
   above (Phase 1)
 - Morpho reader for the demonstration venue (Phase 1)
