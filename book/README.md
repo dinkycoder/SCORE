@@ -8,9 +8,11 @@ written after each build stage ships.
 - 00-title.md ................ Title page
 - 00-preface.md .............. Preface: origin, thesis, structure
 - 01-reading-the-chain.md .... Ch. 1: querying lending-protocol state on Base
+- 02-verifying-the-arithmetic.md .... Ch. 2: reconstructing a wallet's position
+- 03-a-second-protocol.md .... Ch. 3: Morpho Blue's isolated-market model
 - 99-verification-notes.md ... INTERNAL. Unconfirmed citations. Not for publication.
 
-Chapters are numbered so they sort correctly. Add 02-, 03-, and so on as
+Chapters are numbered so they sort correctly. Add 04-, 05-, and so on as
 stages complete.
 
 ## Pagination
@@ -51,3 +53,14 @@ account requires it.
 - Failed experiments stay in the text.
 - Nothing moves from 99-verification-notes.md into a chapter until it has
   been checked against a primary source.
+- Chapters correspond to completed build stages, but the stages are not
+  fixed in advance. The preface's chapter map (added 2026-08-16) was
+  written against the plan as it stood at the time; it describes the map's
+  origin, not a ceiling on what the book may cover. When a stage occurs
+  that the map did not anticipate — as happened 2026-08-23, when the
+  Morpho reader was built to prove SCORE's method ports beyond
+  Compound-family protocols, a piece of work the original plan did not
+  contain — the map is revised to include it, in the position that serves
+  the reader's learning best, and the revision is noted in the preface
+  rather than pretended away. The book documents the project as built,
+  not as originally scheduled.

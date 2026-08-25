@@ -9,7 +9,7 @@
 > independent derivation has confirmed it. Plausibility does not close an
 > item.
 >
-> Last reviewed: 2026-08-16 (rev 2)
+> Last reviewed: 2026-08-25 (rev 3)
 
 ## Closed
 
@@ -68,7 +68,40 @@ near all-time high, growing. Aave: peaked ~$45B late 2025, declined to
 ~$13-15B, contracting. An earlier claim that "both are growing" was wrong on
 Aave and is corrected: only Morpho is growing.
 
+**Morpho Blue core contract address and cbBTC/USDC market ID (Chapter 3).**
+Confirmed 2026-08-23: address `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`
+verified via `eth_getCode` (15,623 bytes of deployed bytecode, not an
+empty account) and against docs.morpho.org's addresses page; market ID
+`0x9103c3b4e8...` and its LLTV (0.86) verified via a direct
+`idToMarketParams` call, not taken from `app.morpho.org`'s page (a JS SPA
+that does not serve market data to a static fetch). See design spec §3
+and `src/morpho/config.py`.
+
+**Morpho cross-check against `blue-api.morpho.org` (Chapter 3 §3.8).**
+Confirmed 2026-08-23: live client output compared against Morpho's own
+public GraphQL API for wallet `0x04a9530da51Eb174153F150FfDF103B368c332E5`
+on the cbBTC/USDC market. Raw collateral share count matched exactly;
+USD figures agreed to within 0.02%. The gap's cause was investigated (two
+candidate explanations ruled out on arithmetic grounds) and not fully
+resolved — recorded as an open discrepancy, not a clean match, in both
+`PHASE_0.md` and the chapter itself.
+
+**MorphoRPCClient single-round-trip parity with BaseRPCClient (Chapter 3
+§3.9).** Confirmed 2026-08-23 by instrumenting real HTTP traffic during a
+live call: 3 raw POSTs per logical `get_wallet_position` call, measured
+the same way as, and equal to, `BaseRPCClient`'s own measured steady-state
+cost. See commit 7c9fad6.
+
 ## Open
+
+**Morpho Blue technical documentation, general citation (Chapter 3, "Morpho
+Labs, n.d.-b").** Cited for the `SharesMathLib.toAssetsUp` rounding
+convention and the virtual-shares/virtual-assets anti-inflation rationale
+in §3.4. The general `docs.morpho.org` citation is a placeholder for the
+specific page (or the `SharesMathLib.sol` source itself, if docs.morpho.org
+does not cover it at the needed level of detail) — locate and cite the
+precise page/file before print, per the same discipline applied to every
+other citation in this list.
 
 **Multicall3 address.** `0xcA11bde05977b3631167028862bE2a173976CA11` is
 documented as a deterministic CREATE2 deployment identical across EVM

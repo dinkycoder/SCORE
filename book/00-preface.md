@@ -70,19 +70,23 @@ The identity is absent. The conduct is not. And the wager underlying this entire
 
 ## Organization of the book
 
-Chapters correspond to build stages.
+Chapters correspond to build stages. The map below is not the one this project began with.
+
+The original plan specified eight chapters, each keyed to a stage the plan had anticipated. That plan did not anticipate everything. In August 2026, verifying that SCORE's method survives contact with an architecture unlike the one it was built against — Morpho Blue's isolated markets, in place of Moonwell's shared-pool Comptroller — became its own build stage, undertaken specifically because the demonstration this book is building toward is stronger for running on a growing protocol than a contracting one, and the harder architecture is what makes the demonstration mean something. No chapter had been reserved for it, because nothing in the original plan foresaw needing one. Rather than compress that stage into a footnote of a chapter about something else, or pretend it had been planned all along, the map is revised here, and the revision is recorded as what it is: the book's own rule that chapters follow completed stages, applied to a stage the plan did not contain. A fixed table of contents drafted before the work exists is a schedule, not a finding, and this book has committed throughout to reporting the second rather than the first.
 
 **Chapter 1 — Reading the Chain.** The contents of a lending protocol's on-chain state, the method of querying it, and the meaning of the returned values. Constructs a working client that reads live wallet state from a lending market on Base.
 
 **Chapter 2 — Verifying the Arithmetic.** The reconstruction of a wallet's full position, the decimal conventions governing it, and the method by which a numerical assumption is established rather than assumed. Includes an account of four defects, each of which passed its own tests.
 
-**Chapter 3 — Scoring in Real Time.** The conversion of verified features into a service that responds within a second, and the boundary between what such a service measures and what it may claim.
+**Chapter 3 — A Second Protocol.** Everything Chapters 1 and 2 established was built against one accounting model. This chapter rebuilds the read path against a second, structurally different one — Morpho Blue's isolated markets, which have no account-level solvency check to lean on — and reports what transferred, what broke quietly, and what an independent cross-check could and could not confirm.
 
-**Chapters 4–5 — Trust on Chain.** Why a score residing upon a private server is worth less than one anchored to a public ledger, and the construction of the contract that anchors it.
+**Chapter 4 — Scoring in Real Time.** The conversion of verified features into a service that responds within a second, and the boundary between what such a service measures and what it may claim.
 
-**Chapters 6–7 — Contact With Reality.** The presentation of the score to actual lenders and the discovery of its deficiencies. This chapter is the one most likely to be painful.
+**Chapters 5–6 — Trust on Chain.** Why a score residing upon a private server is worth less than one anchored to a public ledger, and the construction of the contract that anchors it.
 
-**Chapter 8 — The Pitch.** The assembly of the foregoing into an argument a fund may evaluate, together with candor concerning what the argument does not yet support.
+**Chapters 7–8 — Contact With Reality.** The presentation of the score to actual lenders and the discovery of its deficiencies. This chapter is the one most likely to be painful.
+
+**Chapter 9 — The Pitch.** The assembly of the foregoing into an argument a fund may evaluate, together with candor concerning what the argument does not yet support.
 
 Three constraints obtain throughout. **Interpretability is not optional** — the Consumer Financial Protection Bureau has determined that lenders may not employ algorithms so complex that the specific reasons for a denial cannot be furnished to the borrower (CFPB, 2022), and the European Union's Artificial Intelligence Act classifies systems evaluating the creditworthiness of natural persons as high-risk (Regulation (EU) 2024/1689). **Pseudonymity constitutes a vulnerability and not merely a feature** — a single party may operate a thousand wallets, and John Douceur (2002) demonstrated that absent a central authority such conduct cannot be fully prevented. **The critics warrant engagement rather than dismissal** — legal scholars have argued that crypto-native credit scoring risks constructing a new opaque apparatus with fresh potential for predatory lending (Packin & Lev-Aretz, 2024). Each receives substantive treatment where it becomes pertinent, which is to say as a design constraint rather than as an appendix.
 
