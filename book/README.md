@@ -10,9 +10,10 @@ written after each build stage ships.
 - 01-reading-the-chain.md .... Ch. 1: querying lending-protocol state on Base
 - 02-verifying-the-arithmetic.md .... Ch. 2: reconstructing a wallet's position
 - 03-a-second-protocol.md .... Ch. 3: Morpho Blue's isolated-market model
+- 04-scoring-in-real-time.md . Ch. 4: the HTTP service and its claim boundary
 - 99-verification-notes.md ... INTERNAL. Unconfirmed citations. Not for publication.
 
-Chapters are numbered so they sort correctly. Add 04-, 05-, and so on as
+Chapters are numbered so they sort correctly. Add 05-, and so on as
 stages complete.
 
 ## Pagination

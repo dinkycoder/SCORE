@@ -92,7 +92,31 @@ live call: 3 raw POSTs per logical `get_wallet_position` call, measured
 the same way as, and equal to, `BaseRPCClient`'s own measured steady-state
 cost. See commit 7c9fad6.
 
+**SCORE's regulatory posture (Chapter 4 §4.4).** SCORE takes no custody,
+transmits no value, and holds no signing key on the read path this project
+has built; the money-transmitter analysis (31 C.F.R. § 1010.100(ff)(5)) and
+the case for it turning on those properties are recorded in `COMPLIANCE.md`,
+last reviewed 2026-08-17. That document is explicit that its conclusions
+are informed inferences, not a regulatory ruling or a substitute for
+counsel — the chapter preserves that framing rather than overstating it.
+
+**OFAC screening data source (Chapter 4 §4.4).** The 0xB10C
+`ofac-sanctioned-digital-currency-addresses` GitHub project as the mirrored
+data source, and the nightly-refresh/fail-closed design built around it,
+are confirmed directly against this project's own `src/compliance/sanctions.py`
+and its live tests (`tests/test_sanctions.py`, 9 offline + 1 live, per commit
+91bae9d). Not independently re-verified: 0xB10C's ~120MB figure for OFAC's
+own `sdn_advanced.xml` and its claimed nightly GitHub Actions cadence,
+both taken from the module's own docstring rather than checked against
+treasury.gov or the 0xB10C repository directly.
+
 ## Open
+
+**0xB10C list size/cadence (Chapter 4).** The ~120MB `sdn_advanced.xml`
+figure and "nightly, 00:00 UTC" refresh cadence cited in
+`src/compliance/sanctions.py` and repeated in Chapter 4 §4.4 have not been
+independently checked against treasury.gov or the 0xB10C repository's own
+documentation. Confirm before print.
 
 **Morpho Blue technical documentation, general citation (Chapter 3, "Morpho
 Labs, n.d.-b").** Cited for the `SharesMathLib.toAssetsUp` rounding
